@@ -2,20 +2,20 @@ import requests
 import time
 import os
 import json
+from datetime import datetime
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Update this to the current live hourly market slug
-POLY_SLUG = "bitcoin-up-or-down-march-25-2026-3pm-et"
+POLY_SLUG = "bitcoin-up-or-down-march-25-2026-2pm-et"
 
 # Tuned settings
-MOVE_THRESHOLD = 3.0
-EDGE_THRESHOLD = 0.10       # 10 cents minimum
+EDGE_THRESHOLD = 0.10        # 10 cents minimum edge
 CHECK_SECONDS = 10
-COOLDOWN_SECONDS = 180      # 3 minutes between alerts
+COOLDOWN_SECONDS = 180       # 3 minutes between alerts
 
-last_price = None
+hour_open_price = None
 last_alert_time = 0
 last_alert_side = None
 
@@ -52,24 +52,31 @@ def parse_outcome_prices(raw_value) -> list[float]:
     return [float(parsed[0]), float(parsed[1])]
 
 
+def get_current_hour_key() -> str:
+    now = datetime.utcnow()
+    return now.strftime("%Y-%m-%d-%H")
+
+
 def evaluate_misprice(
     btc_price: float,
     reference_price: float,
     yes_price: float,
     no_price: float,
 ) -> tuple[str | None, float]:
-    if btc_price > reference_price + MOVE_THRESHOLD:
+    if btc_price > reference_price:
         edge = 0.75 - yes_price
         if edge > EDGE_THRESHOLD:
             return "BUY UP", edge
 
-    elif btc_price < reference_price - MOVE_THRESHOLD:
+    elif btc_price < reference_price:
         edge = 0.75 - no_price
         if edge > EDGE_THRESHOLD:
             return "BUY DOWN", edge
 
     return None, 0.0
 
+
+current_hour_key = None
 
 while True:
     try:
@@ -80,15 +87,18 @@ while True:
         yes_price = outcome_prices[0]
         no_price = outcome_prices[1]
 
-        if last_price is None:
-            last_price = btc_price
-            print("Starting reference price:", last_price)
+        new_hour_key = get_current_hour_key()
+
+        if current_hour_key != new_hour_key or hour_open_price is None:
+            current_hour_key = new_hour_key
+            hour_open_price = btc_price
+            print("New hour reference price set:", hour_open_price)
             time.sleep(CHECK_SECONDS)
             continue
 
         action, edge = evaluate_misprice(
             btc_price,
-            last_price,
+            hour_open_price,
             yes_price,
             no_price,
         )
@@ -96,33 +106,32 @@ while True:
         print(
             "DEBUG |",
             "BTC:", btc_price,
-            "REF:", last_price,
+            "HOUR_OPEN:", hour_open_price,
             "YES:", yes_price,
             "NO:", no_price,
             "EDGE:", round(edge, 4),
             "ACTION:", action,
         )
 
-        now = time.time()
+        now_ts = time.time()
 
         if (
             action
-            and (now - last_alert_time) > COOLDOWN_SECONDS
+            and (now_ts - last_alert_time) > COOLDOWN_SECONDS
             and action != last_alert_side
         ):
             send_alert(
                 f"🚨 MISPRICE\n"
                 f"{action}\n"
                 f"BTC: {btc_price}\n"
-                f"Reference: {last_price}\n"
+                f"Hour Open: {hour_open_price}\n"
                 f"YES: {yes_price}\n"
                 f"NO: {no_price}\n"
                 f"Edge: {edge*100:.1f}¢"
             )
-            last_alert_time = now
+            last_alert_time = now_ts
             last_alert_side = action
 
-        last_price = btc_price
         time.sleep(CHECK_SECONDS)
 
     except Exception as e:
