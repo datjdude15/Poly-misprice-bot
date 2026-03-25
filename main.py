@@ -25,12 +25,12 @@ def get_market():
     return r.json()
 
 def evaluate_misprice(btc_price, reference_price, yes_price, no_price):
-    if btc_price > reference_price + 3:
+    if btc_price > reference_price + 1:
         edge = 0.75 - yes_price
         if edge > 0.03:
             return "BUY UP", edge
 
-    elif btc_price < reference_price - 3:
+    elif btc_price < reference_price - 1:
         edge = 0.75 - no_price
         if edge > 0.03:
             return "BUY DOWN", edge
