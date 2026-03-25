@@ -1,8 +1,9 @@
 import requests
 import time
+import os
 
-BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
-CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 def send_alert(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -18,10 +19,9 @@ last_price = get_price()
 while True:
     time.sleep(5)
     current_price = get_price()
-    
     move = current_price - last_price
 
-    if abs(move) > 50:
+    if abs(move) > 0:
         send_alert(f"🚨 BTC MOVE: {move} | PRICE: {current_price}")
-    
+
     last_price = current_price
