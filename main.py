@@ -42,27 +42,31 @@ last_price = None
 while True:
     try:
         btc_price = get_btc_price()
-market = get_market()
+        market = get_market()
 
-yes_price = float(market["outcomePrices"][0])
-no_price = float(market["outcomePrices"][1])
+        yes_price = float(market["outcomePrices"][0])
+        no_price = float(market["outcomePrices"][1])
 
-if last_price is None:
-    last_price = btc_price
-    time.sleep(10)
-    continue
+        if last_price is None:
+            last_price = btc_price
+            time.sleep(10)
+            continue
 
-action, edge = evaluate_misprice(
-    btc_price, last_price, yes_price, no_price
-)
+        action, edge = evaluate_misprice(
+            btc_price, last_price, yes_price, no_price
+        )
 
-if action:
-    send_alert(
-        f"🚨 MISPRICE\n{action}\nBTC: {btc_price}\nReference: {last_price}\nEdge: {edge*100:.1f}¢"
-    )
+        if action:
+            send_alert(
+                f"🚨 MISPRICE\n"
+                f"{action}\n"
+                f"BTC: {btc_price}\n"
+                f"Reference: {last_price}\n"
+                f"Edge: {edge*100:.1f}¢"
+            )
 
-last_price = btc_price
-time.sleep(10)
+        last_price = btc_price
+        time.sleep(10)
 
     except Exception as e:
         print("ERROR:", e)
