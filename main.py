@@ -33,7 +33,7 @@ while True:
         move = current_price - last_price
         print("Move:", move, "Current:", current_price, "Last:", last_price)
 
-        if abs(move) > 0:
+        if abs(move) > 8:
             send_alert(f"🚨 BTC MOVE: {move:.2f} | PRICE: {current_price}")
 
         last_price = current_price
