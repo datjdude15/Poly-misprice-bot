@@ -37,15 +37,21 @@ def evaluate_misprice(btc_price, reference_price, yes_price, no_price):
 
     return None, 0
 
+import json
+
 send_alert("🚀 Polymarket bot live")
+
 last_price = None
+
 while True:
     try:
         btc_price = get_btc_price()
         market = get_market()
 
-        yes_price = float(market["outcomePrices"][0])
-        no_price = float(market["outcomePrices"][1])
+        # Fix outcomePrices parsing
+        outcome_prices = json.loads(market["outcomePrices"])
+        yes_price = float(outcome_prices[0])
+        no_price = float(outcome_prices[1])
 
         if last_price is None:
             last_price = btc_price
@@ -56,6 +62,7 @@ while True:
             btc_price, last_price, yes_price, no_price
         )
 
+        # DEBUG PRINT (for Railway logs)
         print(
             "DEBUG | BTC:", btc_price,
             "REF:", last_price,
@@ -64,6 +71,13 @@ while True:
             "EDGE:", edge,
             "ACTION:", action
         )
+
+        # OPTIONAL: send debug to Telegram (uncomment if needed)
+        # send_alert(
+        #     f"DEBUG\nBTC:{btc_price}\nREF:{last_price}\nYES:{yes_price}\nNO:{no_price}\nEDGE:{edge:.4f}\nACTION:{action}"
+        # )
+        # time.sleep(60)
+        # continue
 
         if action:
             send_alert(
