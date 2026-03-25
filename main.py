@@ -55,7 +55,16 @@ while True:
         action, edge = evaluate_misprice(
             btc_price, last_price, yes_price, no_price
         )
-print("DEBUG | BTC:", btc_price, "REF:", last_price, "YES:", yes_price, "NO:", no_price, "EDGE:", edge, "ACTION:", action)
+
+        print(
+            "DEBUG | BTC:", btc_price,
+            "REF:", last_price,
+            "YES:", yes_price,
+            "NO:", no_price,
+            "EDGE:", edge,
+            "ACTION:", action
+        )
+
         if action:
             send_alert(
                 f"🚨 MISPRICE\n"
