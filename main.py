@@ -5,7 +5,7 @@ import os
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-POLY_SLUG = "bitcoin-up-or-down-march-25-2026-2pm-et"
+POLY_SLUG = "bitcoin-up-or-down-march-25-2026-3pm-et"
 
 def send_alert(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
