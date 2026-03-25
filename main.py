@@ -8,9 +8,10 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-EDGE_THRESHOLD = 0.10
+EDGE_THRESHOLD = 0.10        # 10 cents minimum edge
 CHECK_SECONDS = 10
-COOLDOWN_SECONDS = 180
+COOLDOWN_SECONDS = 180       # 3 minutes between alerts
+MARKET_FETCH_LIMIT = 200
 
 hour_open_price = None
 last_alert_time = 0
@@ -18,28 +19,31 @@ last_alert_side = None
 current_slug = None
 
 
-def send_alert(message):
+def send_alert(message: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=15)
+    requests.post(
+        url,
+        json={"chat_id": CHAT_ID, "text": message},
+        timeout=15,
+    )
 
 
-def get_btc_price():
+def get_btc_price() -> float:
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     return float(r.json()["data"]["amount"])
 
 
-def try_get_market(slug):
-    try:
-        url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
-        r = requests.get(url, timeout=15)
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        return r.json()
-    except:
-        return None
+def list_active_markets() -> list:
+    url = (
+        "https://gamma-api.polymarket.com/markets"
+        f"?active=true&closed=false&limit={MARKET_FETCH_LIMIT}"
+    )
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    return data if isinstance(data, list) else []
 
 
 def parse_prices(raw):
@@ -48,40 +52,62 @@ def parse_prices(raw):
     return float(raw[0]), float(raw[1])
 
 
-def format_slug(dt):
-    hour_12 = dt.hour % 12
+def format_hourly_slug(dt_et: datetime) -> str:
+    hour_12 = dt_et.hour % 12
     if hour_12 == 0:
         hour_12 = 12
 
-    am_pm = "am" if dt.hour < 12 else "pm"
-    month = dt.strftime("%B").lower()
-    day = dt.day
-    year = dt.year
+    am_pm = "am" if dt_et.hour < 12 else "pm"
+    month = dt_et.strftime("%B").lower()
+    day = dt_et.day
+    year = dt_et.year
 
     return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour_12}{am_pm}-et"
 
 
-def get_valid_market():
+def get_candidate_slugs() -> list[str]:
     et_now = datetime.now(ZoneInfo("America/New_York"))
+    prev_hour = et_now - timedelta(hours=1)
+    next_hour = et_now + timedelta(hours=1)
 
-    current_slug = format_slug(et_now)
-    market = try_get_market(current_slug)
+    # Prefer current hour, then previous hour, then next hour if that's all that's live
+    return [
+        format_hourly_slug(et_now),
+        format_hourly_slug(prev_hour),
+        format_hourly_slug(next_hour),
+    ]
 
-    if market:
-        return current_slug, market
 
-    # fallback to previous hour
-    prev_time = et_now - timedelta(hours=1)
-    prev_slug = format_slug(prev_time)
-    market = try_get_market(prev_slug)
+def choose_market(markets: list):
+    candidate_slugs = get_candidate_slugs()
+    market_by_slug = {}
 
-    if market:
-        return prev_slug, market
+    for m in markets:
+        slug = m.get("slug")
+        if slug:
+            market_by_slug[slug] = m
+
+    for slug in candidate_slugs:
+        if slug in market_by_slug:
+            return slug, market_by_slug[slug]
+
+    # Fallback: look for any active Bitcoin hourly market if exact match isn't found
+    for m in markets:
+        slug = (m.get("slug") or "").lower()
+        question = (m.get("question") or "").lower()
+        title = (m.get("title") or "").lower()
+
+        if (
+            "bitcoin-up-or-down" in slug
+            or ("bitcoin" in question and "hourly" in question)
+            or ("bitcoin" in title and "hourly" in title)
+        ):
+            return m.get("slug"), m
 
     return None, None
 
 
-def evaluate(btc, ref, yes, no):
+def evaluate(btc: float, ref: float, yes: float, no: float):
     if btc > ref:
         edge = 0.75 - yes
         if edge > EDGE_THRESHOLD:
@@ -92,18 +118,18 @@ def evaluate(btc, ref, yes, no):
         if edge > EDGE_THRESHOLD:
             return "BUY DOWN", edge
 
-    return None, 0
+    return None, 0.0
 
 
 while True:
     try:
         btc = get_btc_price()
+        markets = list_active_markets()
+        slug, market = choose_market(markets)
 
-        slug, market = get_valid_market()
-
-        if not market:
-            print("No active market yet...")
-            time.sleep(10)
+        if not market or not slug:
+            print("No active market found...")
+            time.sleep(CHECK_SECONDS)
             continue
 
         if slug != current_slug:
@@ -116,17 +142,17 @@ while True:
             continue
 
         yes, no = parse_prices(market["outcomePrices"])
-
         action, edge = evaluate(btc, hour_open_price, yes, no)
 
         print(
-            "DEBUG | BTC:", btc,
+            "DEBUG |",
+            "BTC:", btc,
             "OPEN:", hour_open_price,
             "YES:", yes,
             "NO:", no,
             "EDGE:", edge,
             "ACTION:", action,
-            "SLUG:", slug
+            "SLUG:", slug,
         )
 
         now_ts = time.time()
