@@ -17,12 +17,18 @@ def get_price():
     data = r.json()
     return float(data["data"]["amount"])
 
-last_price = get_price()
-print("Starting price:", last_price)
+send_alert("✅ Bot is live and connected.")
+
+last_price = None
 
 while True:
     try:
-        time.sleep(5)
+        if last_price is None:
+            last_price = get_price()
+            print("Starting price:", last_price)
+            time.sleep(5)
+            continue
+
         current_price = get_price()
         move = current_price - last_price
         print("Move:", move, "Current:", current_price, "Last:", last_price)
@@ -31,7 +37,8 @@ while True:
             send_alert(f"🚨 BTC MOVE: {move:.2f} | PRICE: {current_price}")
 
         last_price = current_price
+        time.sleep(5)
 
     except Exception as e:
-        print("ERROR:", repr(e))
-        time.sleep(5)
+        print("MAIN LOOP ERROR:", repr(e))
+        time.sleep(10)
