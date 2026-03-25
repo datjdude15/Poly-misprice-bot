@@ -6,17 +6,18 @@ import json
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Change this each hour to the live hourly market you want to track
+# Update this to the current live hourly market slug
 POLY_SLUG = "bitcoin-up-or-down-march-25-2026-2pm-et"
 
-# Settings
-MOVE_THRESHOLD = 1.0       # BTC must move at least this much vs reference
-EDGE_THRESHOLD = 0.02      # 2 cents edge minimum
+# Tuned settings
+MOVE_THRESHOLD = 3.0
+EDGE_THRESHOLD = 0.10       # 10 cents minimum
 CHECK_SECONDS = 10
-COOLDOWN_SECONDS = 60      # minimum time between alerts
+COOLDOWN_SECONDS = 180      # 3 minutes between alerts
 
 last_price = None
 last_alert_time = 0
+last_alert_side = None
 
 
 def send_alert(message: str) -> None:
@@ -44,13 +45,10 @@ def get_market() -> dict:
 
 
 def parse_outcome_prices(raw_value) -> list[float]:
-    # Sometimes Polymarket returns outcomePrices as a JSON string like "[0.52,0.48]"
-    # and sometimes it may already be a list.
     if isinstance(raw_value, str):
         parsed = json.loads(raw_value)
     else:
         parsed = raw_value
-
     return [float(parsed[0]), float(parsed[1])]
 
 
@@ -107,7 +105,11 @@ while True:
 
         now = time.time()
 
-        if action and (now - last_alert_time) > COOLDOWN_SECONDS:
+        if (
+            action
+            and (now - last_alert_time) > COOLDOWN_SECONDS
+            and action != last_alert_side
+        ):
             send_alert(
                 f"🚨 MISPRICE\n"
                 f"{action}\n"
@@ -118,6 +120,7 @@ while True:
                 f"Edge: {edge*100:.1f}¢"
             )
             last_alert_time = now
+            last_alert_side = action
 
         last_price = btc_price
         time.sleep(CHECK_SECONDS)
