@@ -1,6 +1,13 @@
 import requests
 import time
 
+BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
+CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
+
+def send_alert(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": CHAT_ID, "text": message})
+
 def get_price():
     url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
     data = requests.get(url).json()
@@ -15,6 +22,6 @@ while True:
     move = current_price - last_price
 
     if abs(move) > 50:
-        print(f"🚨 BIG MOVE: {move} | PRICE: {current_price}")
+        send_alert(f"🚨 BTC MOVE: {move} | PRICE: {current_price}")
     
     last_price = current_price
