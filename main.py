@@ -7,17 +7,15 @@ from datetime import datetime
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Update this to the current live hourly market slug
-POLY_SLUG = "bitcoin-up-or-down-march-25-2026-5pm-et"
-
-# Tuned settings
-EDGE_THRESHOLD = 0.10        # 10 cents minimum edge
+# Settings
+EDGE_THRESHOLD = 0.10
 CHECK_SECONDS = 10
-COOLDOWN_SECONDS = 180       # 3 minutes between alerts
+COOLDOWN_SECONDS = 180
 
 hour_open_price = None
 last_alert_time = 0
 last_alert_side = None
+current_slug = None
 
 
 def send_alert(message: str) -> None:
@@ -33,102 +31,86 @@ def get_btc_price() -> float:
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
-    data = r.json()
-    return float(data["data"]["amount"])
+    return float(r.json()["data"]["amount"])
 
 
-def get_market() -> dict:
-    url = f"https://gamma-api.polymarket.com/markets/slug/{POLY_SLUG}"
+def build_slug():
+    now = datetime.utcnow()
+
+    hour_12 = now.hour % 12
+    if hour_12 == 0:
+        hour_12 = 12
+
+    am_pm = "am" if now.hour < 12 else "pm"
+
+    return f"bitcoin-up-or-down-{now.strftime('%B').lower()}-{now.day}-{now.year}-{hour_12}{am_pm}-et"
+
+
+def get_market(slug):
+    url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     return r.json()
 
 
-def parse_outcome_prices(raw_value) -> list[float]:
-    if isinstance(raw_value, str):
-        parsed = json.loads(raw_value)
-    else:
-        parsed = raw_value
-    return [float(parsed[0]), float(parsed[1])]
+def parse_prices(raw):
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return float(raw[0]), float(raw[1])
 
 
-def get_current_hour_key() -> str:
-    now = datetime.utcnow()
-    return now.strftime("%Y-%m-%d-%H")
-
-
-def evaluate_misprice(
-    btc_price: float,
-    reference_price: float,
-    yes_price: float,
-    no_price: float,
-) -> tuple[str | None, float]:
-    if btc_price > reference_price:
-        edge = 0.75 - yes_price
+def evaluate(btc, ref, yes, no):
+    if btc > ref:
+        edge = 0.75 - yes
         if edge > EDGE_THRESHOLD:
             return "BUY UP", edge
 
-    elif btc_price < reference_price:
-        edge = 0.75 - no_price
+    elif btc < ref:
+        edge = 0.75 - no
         if edge > EDGE_THRESHOLD:
             return "BUY DOWN", edge
 
-    return None, 0.0
+    return None, 0
 
-
-current_hour_key = None
 
 while True:
     try:
-        btc_price = get_btc_price()
-        market = get_market()
+        btc = get_btc_price()
 
-        outcome_prices = parse_outcome_prices(market["outcomePrices"])
-        yes_price = outcome_prices[0]
-        no_price = outcome_prices[1]
+        slug = build_slug()
 
-        new_hour_key = get_current_hour_key()
-
-        if current_hour_key != new_hour_key or hour_open_price is None:
-            current_hour_key = new_hour_key
-            hour_open_price = btc_price
-            print("New hour reference price set:", hour_open_price)
+        # Detect new hour / new market
+        if slug != current_slug:
+            current_slug = slug
+            hour_open_price = btc
+            print("NEW MARKET:", slug)
+            print("Hour open set:", hour_open_price)
             time.sleep(CHECK_SECONDS)
             continue
 
-        action, edge = evaluate_misprice(
-            btc_price,
-            hour_open_price,
-            yes_price,
-            no_price,
-        )
+        market = get_market(slug)
+        yes, no = parse_prices(market["outcomePrices"])
 
-        print(
-            "DEBUG |",
-            "BTC:", btc_price,
-            "HOUR_OPEN:", hour_open_price,
-            "YES:", yes_price,
-            "NO:", no_price,
-            "EDGE:", round(edge, 4),
-            "ACTION:", action,
-        )
+        action, edge = evaluate(btc, hour_open_price, yes, no)
+
+        print("DEBUG | BTC:", btc, "OPEN:", hour_open_price, "YES:", yes, "NO:", no, "EDGE:", edge, "ACTION:", action)
 
         now_ts = time.time()
 
-        if (
-            action
-            and (now_ts - last_alert_time) > COOLDOWN_SECONDS
-            and action != last_alert_side
-        ):
+        if action and (now_ts - last_alert_time > COOLDOWN_SECONDS) and action != last_alert_side:
+            link = f"https://polymarket.com/event/{slug}"
+
             send_alert(
                 f"🚨 MISPRICE\n"
                 f"{action}\n"
-                f"BTC: {btc_price}\n"
+                f"BTC: {btc}\n"
                 f"Hour Open: {hour_open_price}\n"
-                f"YES: {yes_price}\n"
-                f"NO: {no_price}\n"
-                f"Edge: {edge*100:.1f}¢"
+                f"YES: {yes}\n"
+                f"NO: {no}\n"
+                f"Edge: {edge*100:.1f}¢\n"
+                f"{link}"
             )
+
             last_alert_time = now_ts
             last_alert_side = action
 
