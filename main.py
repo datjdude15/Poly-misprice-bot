@@ -24,43 +24,45 @@ def get_market():
     r.raise_for_status()
     return r.json()
 
-def evaluate_misprice(btc_price, start_price, yes_price, no_price):
-    if btc_price > start_price + 5:
+def evaluate_misprice(btc_price, reference_price, yes_price, no_price):
+    if btc_price > reference_price + 3:
         edge = 0.75 - yes_price
-        if edge > 0.05:
+        if edge > 0.03:
             return "BUY UP", edge
 
-    elif btc_price < start_price - 5:
+    elif btc_price < reference_price - 3:
         edge = 0.75 - no_price
-        if edge > 0.05:
+        if edge > 0.03:
             return "BUY DOWN", edge
 
     return None, 0
 
 send_alert("🚀 Polymarket bot live")
-
+last_price = None
 while True:
     try:
         btc_price = get_btc_price()
-        market = get_market()
+market = get_market()
 
-        # Extract prices
-        yes_price = float(market["outcomePrices"][0])
-        no_price = float(market["outcomePrices"][1])
+yes_price = float(market["outcomePrices"][0])
+no_price = float(market["outcomePrices"][1])
 
-        # Approximate starting price
-        start_price = float(market["initialValue"])
+if last_price is None:
+    last_price = btc_price
+    time.sleep(10)
+    continue
 
-        action, edge = evaluate_misprice(
-            btc_price, start_price, yes_price, no_price
-        )
+action, edge = evaluate_misprice(
+    btc_price, last_price, yes_price, no_price
+)
 
-        if action:
-            send_alert(
-                f"🚨 MISPRICE\n{action}\nBTC: {btc_price}\nEdge: {edge*100:.1f}¢"
-            )
+if action:
+    send_alert(
+        f"🚨 MISPRICE\n{action}\nBTC: {btc_price}\nReference: {last_price}\nEdge: {edge*100:.1f}¢"
+    )
 
-        time.sleep(10)
+last_price = btc_price
+time.sleep(10)
 
     except Exception as e:
         print("ERROR:", e)
