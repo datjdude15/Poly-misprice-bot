@@ -11,11 +11,11 @@ def send_alert(message):
     print("Telegram:", r.status_code, r.text)
 
 def get_price():
-    url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+    url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     data = r.json()
-    return float(data["price"])
+    return float(data["data"]["amount"])
 
 last_price = get_price()
 print("Starting price:", last_price)
