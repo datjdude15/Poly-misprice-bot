@@ -8,7 +8,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Update this to the current live hourly market slug
-POLY_SLUG = "bitcoin-up-or-down-march-25-2026-4pm-et"
+POLY_SLUG = "bitcoin-up-or-down-march-25-2026-5pm-et"
 
 # Tuned settings
 EDGE_THRESHOLD = 0.10        # 10 cents minimum edge
