@@ -2,16 +2,15 @@ import requests
 import time
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Settings
-EDGE_THRESHOLD = 0.10        # 10 cents minimum edge
+EDGE_THRESHOLD = 0.10
 CHECK_SECONDS = 10
-COOLDOWN_SECONDS = 180       # 3 minutes between alerts
+COOLDOWN_SECONDS = 180
 
 hour_open_price = None
 last_alert_time = 0
@@ -19,27 +18,28 @@ last_alert_side = None
 current_slug = None
 
 
-def send_alert(message: str) -> None:
+def send_alert(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(
-        url,
-        json={"chat_id": CHAT_ID, "text": message},
-        timeout=15,
-    )
+    requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=15)
 
 
-def get_btc_price() -> float:
+def get_btc_price():
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     return float(r.json()["data"]["amount"])
 
 
-def get_market(slug: str) -> dict:
-    url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
-    r = requests.get(url, timeout=15)
-    r.raise_for_status()
-    return r.json()
+def try_get_market(slug):
+    try:
+        url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
+        r = requests.get(url, timeout=15)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except:
+        return None
 
 
 def parse_prices(raw):
@@ -48,23 +48,40 @@ def parse_prices(raw):
     return float(raw[0]), float(raw[1])
 
 
-def build_slug() -> str:
-    et_now = datetime.now(ZoneInfo("America/New_York"))
-
-    hour_12 = et_now.hour % 12
+def format_slug(dt):
+    hour_12 = dt.hour % 12
     if hour_12 == 0:
         hour_12 = 12
 
-    am_pm = "am" if et_now.hour < 12 else "pm"
-
-    month = et_now.strftime("%B").lower()
-    day = et_now.day
-    year = et_now.year
+    am_pm = "am" if dt.hour < 12 else "pm"
+    month = dt.strftime("%B").lower()
+    day = dt.day
+    year = dt.year
 
     return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour_12}{am_pm}-et"
 
 
-def evaluate(btc: float, ref: float, yes: float, no: float):
+def get_valid_market():
+    et_now = datetime.now(ZoneInfo("America/New_York"))
+
+    current_slug = format_slug(et_now)
+    market = try_get_market(current_slug)
+
+    if market:
+        return current_slug, market
+
+    # fallback to previous hour
+    prev_time = et_now - timedelta(hours=1)
+    prev_slug = format_slug(prev_time)
+    market = try_get_market(prev_slug)
+
+    if market:
+        return prev_slug, market
+
+    return None, None
+
+
+def evaluate(btc, ref, yes, no):
     if btc > ref:
         edge = 0.75 - yes
         if edge > EDGE_THRESHOLD:
@@ -75,38 +92,41 @@ def evaluate(btc: float, ref: float, yes: float, no: float):
         if edge > EDGE_THRESHOLD:
             return "BUY DOWN", edge
 
-    return None, 0.0
+    return None, 0
 
 
 while True:
     try:
         btc = get_btc_price()
-        slug = build_slug()
 
-        # Detect new hour / new market
+        slug, market = get_valid_market()
+
+        if not market:
+            print("No active market yet...")
+            time.sleep(10)
+            continue
+
         if slug != current_slug:
             current_slug = slug
             hour_open_price = btc
             last_alert_side = None
-            print("NEW MARKET:", slug)
-            print("Hour open set:", hour_open_price)
+            print("SWITCHED MARKET:", slug)
+            print("Hour open:", hour_open_price)
             time.sleep(CHECK_SECONDS)
             continue
 
-        market = get_market(slug)
         yes, no = parse_prices(market["outcomePrices"])
 
         action, edge = evaluate(btc, hour_open_price, yes, no)
 
         print(
-            "DEBUG |",
-            "BTC:", btc,
+            "DEBUG | BTC:", btc,
             "OPEN:", hour_open_price,
             "YES:", yes,
             "NO:", no,
             "EDGE:", edge,
             "ACTION:", action,
-            "SLUG:", slug,
+            "SLUG:", slug
         )
 
         now_ts = time.time()
