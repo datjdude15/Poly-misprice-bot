@@ -20,16 +20,12 @@ last_alert_side = None
 current_slug = None
 
 
-def send_alert(message: str) -> None:
+def send_alert(message: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(
-        url,
-        json={"chat_id": CHAT_ID, "text": message},
-        timeout=15,
-    )
+    requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=15)
 
 
-def get_btc_price() -> float:
+def get_btc_price():
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
@@ -42,132 +38,54 @@ def parse_prices(raw):
     return float(raw[0]), float(raw[1])
 
 
-def normalize_text(text: str) -> str:
-    if not text:
-        return ""
-    text = text.lower()
-    text = text.replace("–", "-")
-    text = text.replace("—", "-")
-    text = text.replace("  ", " ")
-    return text.strip()
+def hour_to_12(h):
+    h = h % 12
+    return 12 if h == 0 else h
 
 
-def hour_to_12(hour_24: int) -> int:
-    hour_12 = hour_24 % 12
-    return 12 if hour_12 == 0 else hour_12
+def ampm(h):
+    return "am" if h < 12 else "pm"
 
 
-def am_pm(hour_24: int) -> str:
-    return "am" if hour_24 < 12 else "pm"
+def build_slug(dt):
+    month = dt.strftime("%B").lower()
+    day = dt.day
+    year = dt.year
+    hour = hour_to_12(dt.hour)
+    suffix = ampm(dt.hour)
+    return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour}{suffix}-et"
 
 
-def build_slug(dt_et: datetime) -> str:
-    month = dt_et.strftime("%B").lower()
-    day = dt_et.day
-    year = dt_et.year
-    start_hour = hour_to_12(dt_et.hour)
-    suffix = am_pm(dt_et.hour)
-    return f"bitcoin-up-or-down-{month}-{day}-{year}-{start_hour}{suffix}-et"
-
-
-def build_candidate_times(now_et: datetime):
-    return [
-        now_et,
-        now_et - timedelta(hours=1),
-        now_et + timedelta(hours=1),
-    ]
-
-
-def get_market_by_slug(slug: str):
+def get_market(slug):
     try:
         url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=10)
         if r.status_code == 404:
             return None
         r.raise_for_status()
         return r.json()
-    except Exception:
+    except:
         return None
 
 
-def market_text_blob(market: dict) -> str:
-    parts = [
-        market.get("question", ""),
-        market.get("title", ""),
-        market.get("description", ""),
-        market.get("slug", ""),
+def find_market(now):
+    candidates = [
+        now,
+        now - timedelta(hours=1),
+        now + timedelta(hours=1),
     ]
-    return normalize_text(" | ".join(str(p) for p in parts if p))
 
+    for dt in candidates:
+        slug = build_slug(dt)
+        market = get_market(slug)
 
-def expected_window_variants(now_et: datetime):
-    start_hour_24 = now_et.hour
-    end_hour_24 = (now_et.hour + 1) % 24
-
-    start_12 = hour_to_12(start_hour_24)
-    end_12 = hour_to_12(end_hour_24)
-
-    # Polymarket usually words it like "7-8pm ET"
-    # We intentionally keep the suffix on the END hour only.
-    end_suffix = am_pm(end_hour_24)
-
-    month_name = normalize_text(now_et.strftime("%B"))
-    day_num = str(now_et.day)
-
-    window_core_1 = f"{start_12}-{end_12}{end_suffix} et"
-    window_core_2 = f"{start_12} - {end_12}{end_suffix} et"
-    window_core_3 = f"{start_12}-{end_12} {end_suffix} et"
-    window_core_4 = f"{start_12} - {end_12} {end_suffix} et"
-
-    date_core_1 = f"{month_name} {day_num}"
-    date_core_2 = f"{month_name} {day_num},"
-
-    return {
-        "window_variants": [
-            window_core_1,
-            window_core_2,
-            window_core_3,
-            window_core_4,
-        ],
-        "date_variants": [
-            date_core_1,
-            date_core_2,
-        ],
-    }
-
-
-def validate_market_for_current_hour(market: dict, now_et: datetime):
-    blob = market_text_blob(market)
-    expected = expected_window_variants(now_et)
-
-    has_identity = (
-        "bitcoin up or down" in blob
-        or "bitcoin-up-or-down" in blob
-    ) and "hourly" in blob
-
-    has_date = any(d in blob for d in expected["date_variants"])
-    has_window = any(w in blob for w in expected["window_variants"])
-
-    return has_identity and has_date and has_window
-
-
-def find_valid_market(now_et: datetime):
-    candidate_times = build_candidate_times(now_et)
-
-    # Try current, previous, next slug — but validate against CURRENT hour wording
-    for dt_candidate in candidate_times:
-        slug = build_slug(dt_candidate)
-        market = get_market_by_slug(slug)
-        if not market:
-            continue
-
-        if validate_market_for_current_hour(market, now_et):
+        if market:
             return slug, market
 
     return None, None
 
 
-def evaluate(btc: float, ref: float, yes: float, no: float):
+def evaluate(btc, ref, yes, no):
     if btc > ref:
         edge = 0.75 - yes
         if edge > EDGE_THRESHOLD:
@@ -178,18 +96,21 @@ def evaluate(btc: float, ref: float, yes: float, no: float):
         if edge > EDGE_THRESHOLD:
             return "BUY DOWN", edge
 
-    return None, 0.0
+    return None, 0
 
 
+# ------------------------
+# MAIN LOOP
+# ------------------------
 while True:
     try:
         btc = get_btc_price()
-        now_et = datetime.now(ET)
+        now = datetime.now(ET)
 
-        slug, market = find_valid_market(now_et)
+        slug, market = find_market(now)
 
-        if not market or not slug:
-            print("No validated current-hour market found...")
+        if not market:
+            print("No market found...")
             time.sleep(CHECK_SECONDS)
             continue
 
@@ -197,23 +118,26 @@ while True:
             current_slug = slug
             hour_open_price = btc
             last_alert_side = None
+
             print("SWITCHED MARKET:", slug)
             print("Hour open:", hour_open_price)
+
             time.sleep(CHECK_SECONDS)
             continue
 
         yes, no = parse_prices(market["outcomePrices"])
+
         action, edge = evaluate(btc, hour_open_price, yes, no)
 
         print(
-            "DEBUG |",
-            "BTC:", btc,
-            "OPEN:", hour_open_price,
-            "YES:", yes,
-            "NO:", no,
-            "EDGE:", round(edge, 4),
-            "ACTION:", action,
-            "SLUG:", slug,
+            "DEBUG:",
+            btc,
+            hour_open_price,
+            yes,
+            no,
+            edge,
+            action,
+            slug,
         )
 
         now_ts = time.time()
