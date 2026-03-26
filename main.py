@@ -44,6 +44,7 @@ def send_alert(message: str):
 def get_btc_price():
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
+    r.raise_for_status()
     return float(r.json()["data"]["amount"])
 
 
@@ -66,12 +67,13 @@ def build_slug(dt):
     return f"bitcoin-up-or-down-{dt.strftime('%B').lower()}-{dt.day}-{dt.year}-{hour_to_12(dt.hour)}{ampm(dt.hour)}-et"
 
 
-def get_market(slug):
+def get_market(slug: str):
     try:
         url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
         r = requests.get(url, timeout=10)
         if r.status_code == 404:
             return None
+        r.raise_for_status()
         return r.json()
     except:
         return None
@@ -95,7 +97,7 @@ def in_no_trade_window(now):
 # =========================
 # TRADE PLAN LOGIC
 # =========================
-def build_trade_plan(edge, action):
+def build_trade_plan(edge, action, yes_price, no_price):
     edge_cents = edge * 100
 
     if edge_cents < 25:
@@ -104,20 +106,31 @@ def build_trade_plan(edge, action):
         tp = "+6 to +8¢"
         sl = "-4 to -5¢"
         time_stop = "10–12 min"
+        entry_slippage = 0.01
     elif edge_cents < 40:
         tier = "MEDIUM"
         unit = "1u"
         tp = "+8 to +12¢"
         sl = "-5 to -7¢"
         time_stop = "15–20 min"
+        entry_slippage = 0.02
     else:
         tier = "LARGE"
         unit = "1.5u"
         tp = "Scale: +10¢ / +15–20¢"
         sl = "-6 to -8¢"
         time_stop = "20–30 min"
+        entry_slippage = 0.03
 
-    return tier, unit, tp, sl, time_stop
+    if action == "BUY UP":
+        base_price = yes_price
+    else:
+        base_price = no_price
+
+    entry_min = round(base_price, 3)
+    entry_max = round(base_price + entry_slippage, 3)
+
+    return tier, unit, tp, sl, time_stop, entry_min, entry_max
 
 
 # =========================
@@ -195,7 +208,7 @@ while True:
 
         if confirmed and (now_ts - last_alert_time > COOLDOWN_SECONDS) and action != last_alert_side:
 
-            tier, unit, tp, sl, time_stop = build_trade_plan(edge, action)
+            tier, unit, tp, sl, time_stop, entry_min, entry_max = build_trade_plan(edge, action, yes, no)
 
             link = f"https://polymarket.com/event/{slug}"
 
@@ -208,6 +221,9 @@ while True:
                 f"YES: {yes}\n"
                 f"NO: {no}\n"
                 f"Edge: {edge*100:.1f}¢\n\n"
+                f"📍 ENTRY ZONE\n"
+                f"{entry_min} – {entry_max}\n"
+                f"Do Not Chase Above: {entry_max}\n\n"
                 f"📊 TRADE PLAN\n"
                 f"Tier: {tier}\n"
                 f"Size: {unit}\n"
