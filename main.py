@@ -2,7 +2,6 @@ import requests
 import time
 import os
 import json
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -12,14 +11,13 @@ CHAT_ID = os.getenv("CHAT_ID")
 EDGE_THRESHOLD = 0.10
 CHECK_SECONDS = 10
 COOLDOWN_SECONDS = 180
-MARKET_FETCH_LIMIT = 300
+
+ET = ZoneInfo("America/New_York")
 
 hour_open_price = None
 last_alert_time = 0
 last_alert_side = None
 current_slug = None
-
-ET = ZoneInfo("America/New_York")
 
 
 def send_alert(message: str) -> None:
@@ -38,95 +36,134 @@ def get_btc_price() -> float:
     return float(r.json()["data"]["amount"])
 
 
-def list_active_markets() -> list:
-    url = (
-        "https://gamma-api.polymarket.com/markets"
-        f"?active=true&closed=false&limit={MARKET_FETCH_LIMIT}"
-    )
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    return data if isinstance(data, list) else []
-
-
 def parse_prices(raw):
     if isinstance(raw, str):
         raw = json.loads(raw)
     return float(raw[0]), float(raw[1])
 
 
-def format_hourly_slug(dt_et: datetime) -> str:
-    hour_12 = dt_et.hour % 12
-    if hour_12 == 0:
-        hour_12 = 12
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.lower()
+    text = text.replace("–", "-")
+    text = text.replace("—", "-")
+    text = text.replace("  ", " ")
+    return text.strip()
 
-    am_pm = "am" if dt_et.hour < 12 else "pm"
+
+def hour_to_12(hour_24: int) -> int:
+    hour_12 = hour_24 % 12
+    return 12 if hour_12 == 0 else hour_12
+
+
+def am_pm(hour_24: int) -> str:
+    return "am" if hour_24 < 12 else "pm"
+
+
+def build_slug(dt_et: datetime) -> str:
     month = dt_et.strftime("%B").lower()
     day = dt_et.day
     year = dt_et.year
+    start_hour = hour_to_12(dt_et.hour)
+    suffix = am_pm(dt_et.hour)
+    return f"bitcoin-up-or-down-{month}-{day}-{year}-{start_hour}{suffix}-et"
 
-    return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour_12}{am_pm}-et"
 
-
-def build_preferred_slugs() -> list[str]:
-    now_et = datetime.now(ET)
+def build_candidate_times(now_et: datetime):
     return [
-        format_hourly_slug(now_et),
-        format_hourly_slug(now_et - timedelta(hours=1)),
-        format_hourly_slug(now_et + timedelta(hours=1)),
+        now_et,
+        now_et - timedelta(hours=1),
+        now_et + timedelta(hours=1),
     ]
 
 
-def is_btc_hourly_market(m: dict) -> bool:
-    slug = (m.get("slug") or "").lower()
-    question = (m.get("question") or "").lower()
-    title = (m.get("title") or "").lower()
+def get_market_by_slug(slug: str):
+    try:
+        url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
+        r = requests.get(url, timeout=15)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
-    return (
-        "bitcoin-up-or-down" in slug
-        or ("bitcoin" in question and "hourly" in question)
-        or ("bitcoin" in title and "hourly" in title)
-    )
+
+def market_text_blob(market: dict) -> str:
+    parts = [
+        market.get("question", ""),
+        market.get("title", ""),
+        market.get("description", ""),
+        market.get("slug", ""),
+    ]
+    return normalize_text(" | ".join(str(p) for p in parts if p))
 
 
-def choose_market(markets: list):
-    preferred_slugs = build_preferred_slugs()
+def expected_window_variants(now_et: datetime):
+    start_hour_24 = now_et.hour
+    end_hour_24 = (now_et.hour + 1) % 24
 
-    # 1) Exact match priority: current ET hour, then previous, then next
-    market_by_slug = {}
-    for m in markets:
-        slug = m.get("slug")
-        if slug:
-            market_by_slug[slug] = m
+    start_12 = hour_to_12(start_hour_24)
+    end_12 = hour_to_12(end_hour_24)
 
-    for slug in preferred_slugs:
-        if slug in market_by_slug:
-            return slug, market_by_slug[slug]
+    # Polymarket usually words it like "7-8pm ET"
+    # We intentionally keep the suffix on the END hour only.
+    end_suffix = am_pm(end_hour_24)
 
-    # 2) Fallback: only consider active BTC hourly markets
-    btc_hourlies = [m for m in markets if is_btc_hourly_market(m)]
-    if not btc_hourlies:
-        return None, None
+    month_name = normalize_text(now_et.strftime("%B"))
+    day_num = str(now_et.day)
 
-    # 3) If exact match failed, choose the market whose slug is closest to one
-    #    of the preferred slugs by date/hour pattern.
-    #    We score current hour best, previous second, next third, anything else ignored.
-    def score_market(m):
-        slug = (m.get("slug") or "").lower()
-        if slug == preferred_slugs[0]:
-            return 0
-        if slug == preferred_slugs[1]:
-            return 1
-        if slug == preferred_slugs[2]:
-            return 2
-        return 999
+    window_core_1 = f"{start_12}-{end_12}{end_suffix} et"
+    window_core_2 = f"{start_12} - {end_12}{end_suffix} et"
+    window_core_3 = f"{start_12}-{end_12} {end_suffix} et"
+    window_core_4 = f"{start_12} - {end_12} {end_suffix} et"
 
-    btc_hourlies.sort(key=score_market)
+    date_core_1 = f"{month_name} {day_num}"
+    date_core_2 = f"{month_name} {day_num},"
 
-    if score_market(btc_hourlies[0]) < 999:
-        return btc_hourlies[0].get("slug"), btc_hourlies[0]
+    return {
+        "window_variants": [
+            window_core_1,
+            window_core_2,
+            window_core_3,
+            window_core_4,
+        ],
+        "date_variants": [
+            date_core_1,
+            date_core_2,
+        ],
+    }
 
-    # 4) Final fallback: return None instead of picking a random far-future market
+
+def validate_market_for_current_hour(market: dict, now_et: datetime):
+    blob = market_text_blob(market)
+    expected = expected_window_variants(now_et)
+
+    has_identity = (
+        "bitcoin up or down" in blob
+        or "bitcoin-up-or-down" in blob
+    ) and "hourly" in blob
+
+    has_date = any(d in blob for d in expected["date_variants"])
+    has_window = any(w in blob for w in expected["window_variants"])
+
+    return has_identity and has_date and has_window
+
+
+def find_valid_market(now_et: datetime):
+    candidate_times = build_candidate_times(now_et)
+
+    # Try current, previous, next slug — but validate against CURRENT hour wording
+    for dt_candidate in candidate_times:
+        slug = build_slug(dt_candidate)
+        market = get_market_by_slug(slug)
+        if not market:
+            continue
+
+        if validate_market_for_current_hour(market, now_et):
+            return slug, market
+
     return None, None
 
 
@@ -147,11 +184,12 @@ def evaluate(btc: float, ref: float, yes: float, no: float):
 while True:
     try:
         btc = get_btc_price()
-        markets = list_active_markets()
-        slug, market = choose_market(markets)
+        now_et = datetime.now(ET)
+
+        slug, market = find_valid_market(now_et)
 
         if not market or not slug:
-            print("No active market found...")
+            print("No validated current-hour market found...")
             time.sleep(CHECK_SECONDS)
             continue
 
@@ -173,7 +211,7 @@ while True:
             "OPEN:", hour_open_price,
             "YES:", yes,
             "NO:", no,
-            "EDGE:", edge,
+            "EDGE:", round(edge, 4),
             "ACTION:", action,
             "SLUG:", slug,
         )
