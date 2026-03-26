@@ -13,16 +13,16 @@ CHAT_ID = os.getenv("CHAT_ID")
 # =========================
 EDGE_THRESHOLD = 0.15
 MOVE_THRESHOLD = 15.0
-CHECK_SECONDS = 10
+CHECK_SECONDS = 1
 COOLDOWN_SECONDS = 180
 NO_TRADE_MINUTES = 5
 CONFIRMATION_CHECKS = 2
 
 # Pullback settings
-PULLBACK_GRACE_SECONDS = 600      # 10 min after first signal
-PULLBACK_REENTRY_BUFFER = 0.02    # how close back toward entry zone before alerting
-LATE_PRICE_BUFFER = 0.07          # if price is more than 7c above max entry, skip initial entry
-PULLBACK_MIN_EXTENSION = 0.03     # only track pullback if price first moved at least 3c beyond entry
+PULLBACK_GRACE_SECONDS = 600
+PULLBACK_REENTRY_BUFFER = 0.02
+LATE_PRICE_BUFFER = 0.07
+PULLBACK_MIN_EXTENSION = 0.03
 
 ET = ZoneInfo("America/New_York")
 
@@ -38,9 +38,27 @@ current_slug = None
 pending_action = None
 pending_count = 0
 
-# Pullback state
-pullback_watch = None
 
+def reset_pullback_watch():
+    return {
+        "active": False,
+        "alert_sent": False,
+        "created_ts": 0,
+        "action": None,
+        "edge": 0.0,
+        "tier": None,
+        "unit": None,
+        "tp": None,
+        "sl": None,
+        "time_stop": None,
+        "entry_min": None,
+        "entry_max": None,
+        "extended_price": None,
+        "slug": None,
+    }
+
+
+pullback_watch = reset_pullback_watch()
 
 # =========================
 # HELPERS
@@ -178,28 +196,6 @@ def is_too_late_to_chase(action, yes, no, entry_max):
     return price_now > (entry_max + LATE_PRICE_BUFFER)
 
 
-def reset_pullback_watch():
-    return {
-        "active": False,
-        "alert_sent": False,
-        "created_ts": 0,
-        "action": None,
-        "edge": 0.0,
-        "tier": None,
-        "unit": None,
-        "tp": None,
-        "sl": None,
-        "time_stop": None,
-        "entry_min": None,
-        "entry_max": None,
-        "extended_price": None,
-        "slug": None,
-    }
-
-
-pullback_watch = reset_pullback_watch()
-
-
 def start_pullback_watch(now_ts, action, edge, tier, unit, tp, sl, time_stop, entry_min, entry_max, yes, no, slug):
     global pullback_watch
 
@@ -230,12 +226,8 @@ def update_pullback_watch_extension(action, yes, no):
 
     price_now = current_side_price(action, yes, no)
 
-    if action == "BUY UP":
-        if price_now > pullback_watch["extended_price"]:
-            pullback_watch["extended_price"] = price_now
-    elif action == "BUY DOWN":
-        if price_now > pullback_watch["extended_price"]:
-            pullback_watch["extended_price"] = price_now
+    if price_now > pullback_watch["extended_price"]:
+        pullback_watch["extended_price"] = price_now
 
 
 def should_fire_pullback_alert(now_ts, action, edge, yes, no):
@@ -259,11 +251,9 @@ def should_fire_pullback_alert(now_ts, action, edge, yes, no):
     entry_max = pullback_watch["entry_max"]
     extended_price = pullback_watch["extended_price"]
 
-    # Need real extension first, otherwise this wasn't truly missed
     if extended_price < (entry_max + PULLBACK_MIN_EXTENSION):
         return False, None
 
-    # Pullback zone: back near entry zone, but not too far beyond it
     pullback_max = entry_max + PULLBACK_REENTRY_BUFFER
 
     if entry_min <= price_now <= pullback_max:
@@ -272,6 +262,9 @@ def should_fire_pullback_alert(now_ts, action, edge, yes, no):
     return False, None
 
 
+# =========================
+# MAIN LOOP
+# =========================
 while True:
     try:
         btc = get_btc_price()
@@ -328,7 +321,6 @@ while True:
             tier, unit, tp, sl, time_stop, entry_min, entry_max = build_trade_plan(edge, action, yes, no)
             link = f"https://polymarket.com/event/{slug}"
 
-            # Case 1: initial entry still valid
             if is_initial_entry_still_valid(action, yes, no, entry_max) and action != last_alert_side:
                 send_alert(
                     f"MISPRICE\n"
@@ -357,7 +349,6 @@ while True:
                 pending_count = 0
                 pullback_watch = reset_pullback_watch()
 
-            # Case 2: initial setup valid, but price too late -> start pullback watch
             elif is_too_late_to_chase(action, yes, no, entry_max):
                 start_pullback_watch(
                     now_ts=now_ts,
@@ -418,7 +409,6 @@ while True:
                 last_alert_side = action_pb
                 pullback_watch["alert_sent"] = True
 
-            # Expire stale watch
             if now_ts - pullback_watch["created_ts"] > PULLBACK_GRACE_SECONDS:
                 pullback_watch = reset_pullback_watch()
 
