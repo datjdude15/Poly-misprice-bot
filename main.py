@@ -11,19 +11,26 @@ CHAT_ID = os.getenv("CHAT_ID")
 # =========================
 # SETTINGS
 # =========================
-EDGE_THRESHOLD = 0.20          # minimum edge required (20 cents)
-MOVE_THRESHOLD = 20.0          # BTC must be at least $20 away from hour open
+EDGE_THRESHOLD = 0.15          # 15 cents minimum edge
+MOVE_THRESHOLD = 15.0          # BTC must be at least $15 away from hour open
 CHECK_SECONDS = 10             # how often to check
 COOLDOWN_SECONDS = 180         # wait 3 min between alerts
+NO_TRADE_MINUTES = 5           # ignore first 5 minutes of each new hour
+CONFIRMATION_CHECKS = 2        # require same signal twice in a row
+
 ET = ZoneInfo("America/New_York")
 
 # =========================
 # STATE
 # =========================
 hour_open_price = None
+hour_started_at = None
 last_alert_time = 0
 last_alert_side = None
 current_slug = None
+
+pending_action = None
+pending_count = 0
 
 
 # =========================
@@ -60,7 +67,7 @@ def ampm(h: int) -> str:
     return "am" if h < 12 else "pm"
 
 
-def build_slug(dt: datetime) -> str:
+def build_slug(dt):
     month = dt.strftime("%B").lower()
     day = dt.day
     year = dt.year
@@ -77,15 +84,15 @@ def get_market(slug: str):
             return None
         r.raise_for_status()
         return r.json()
-    except Exception:
+    except:
         return None
 
 
-def find_market(now_et: datetime):
+def find_market(now):
     candidates = [
-        now_et,
-        now_et - timedelta(hours=1),
-        now_et + timedelta(hours=1),
+        now,
+        now - timedelta(hours=1),
+        now + timedelta(hours=1),
     ]
 
     for dt in candidates:
@@ -95,6 +102,13 @@ def find_market(now_et: datetime):
             return slug, market
 
     return None, None
+
+
+def in_no_trade_window(now_et: datetime) -> bool:
+    if hour_started_at is None:
+        return True
+    seconds_since_hour_start = (now_et - hour_started_at).total_seconds()
+    return seconds_since_hour_start < (NO_TRADE_MINUTES * 60)
 
 
 # =========================
@@ -109,14 +123,12 @@ def evaluate_signal(btc: float, hour_open: float, yes: float, no: float):
         return None, 0.0, move, "MOVE_TOO_SMALL"
 
     # 2) Direction filter
-    # Above open -> only UP makes sense
     if move > 0:
         edge = 0.75 - yes
         if edge >= EDGE_THRESHOLD:
             return "BUY UP", edge, move, "VALID_UP"
         return None, edge, move, "EDGE_TOO_SMALL_UP"
 
-    # Below open -> only DOWN makes sense
     if move < 0:
         edge = 0.75 - no
         if edge >= EDGE_THRESHOLD:
@@ -145,10 +157,15 @@ while True:
         if slug != current_slug:
             current_slug = slug
             hour_open_price = btc
+            hour_started_at = now_et.replace(minute=0, second=0, microsecond=0)
+
             last_alert_side = None
+            pending_action = None
+            pending_count = 0
 
             print("SWITCHED MARKET:", slug)
             print("Hour open:", hour_open_price)
+            print("Hour started at:", hour_started_at)
 
             time.sleep(CHECK_SECONDS)
             continue
@@ -162,6 +179,38 @@ while True:
             no=no
         )
 
+        # 3) No-trade window after new hour starts
+        if in_no_trade_window(now_et):
+            print(
+                "DEBUG |",
+                "BTC:", btc,
+                "OPEN:", hour_open_price,
+                "MOVE:", round(move, 2),
+                "YES:", yes,
+                "NO:", no,
+                "EDGE:", round(edge, 4),
+                "ACTION:", action,
+                "REASON:", "NO_TRADE_WINDOW",
+                "SLUG:", slug,
+            )
+            pending_action = None
+            pending_count = 0
+            time.sleep(CHECK_SECONDS)
+            continue
+
+        # 4) Persistence confirmation
+        if action:
+            if action == pending_action:
+                pending_count += 1
+            else:
+                pending_action = action
+                pending_count = 1
+        else:
+            pending_action = None
+            pending_count = 0
+
+        confirmed = action is not None and pending_count >= CONFIRMATION_CHECKS
+
         print(
             "DEBUG |",
             "BTC:", btc,
@@ -171,6 +220,9 @@ while True:
             "NO:", no,
             "EDGE:", round(edge, 4),
             "ACTION:", action,
+            "PENDING:", pending_action,
+            "COUNT:", pending_count,
+            "CONFIRMED:", confirmed,
             "REASON:", reason,
             "SLUG:", slug,
         )
@@ -178,7 +230,7 @@ while True:
         now_ts = time.time()
 
         if (
-            action
+            confirmed
             and (now_ts - last_alert_time > COOLDOWN_SECONDS)
             and action != last_alert_side
         ):
@@ -198,6 +250,8 @@ while True:
 
             last_alert_time = now_ts
             last_alert_side = action
+            pending_action = None
+            pending_count = 0
 
         time.sleep(CHECK_SECONDS)
 
