@@ -11,12 +11,12 @@ CHAT_ID = os.getenv("CHAT_ID")
 # =========================
 # SETTINGS
 # =========================
-EDGE_THRESHOLD = 0.15          # 15 cents minimum edge
-MOVE_THRESHOLD = 15.0          # BTC must be at least $15 away from hour open
-CHECK_SECONDS = 10             # how often to check
-COOLDOWN_SECONDS = 180         # wait 3 min between alerts
-NO_TRADE_MINUTES = 5           # ignore first 5 minutes of each new hour
-CONFIRMATION_CHECKS = 2        # require same signal twice in a row
+EDGE_THRESHOLD = 0.15
+MOVE_THRESHOLD = 15.0
+CHECK_SECONDS = 10
+COOLDOWN_SECONDS = 180
+NO_TRADE_MINUTES = 5
+CONFIRMATION_CHECKS = 2
 
 ET = ZoneInfo("America/New_York")
 
@@ -38,17 +38,12 @@ pending_count = 0
 # =========================
 def send_alert(message: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(
-        url,
-        json={"chat_id": CHAT_ID, "text": message},
-        timeout=15
-    )
+    requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=15)
 
 
-def get_btc_price() -> float:
+def get_btc_price():
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
-    r.raise_for_status()
     return float(r.json()["data"]["amount"])
 
 
@@ -58,84 +53,94 @@ def parse_prices(raw):
     return float(raw[0]), float(raw[1])
 
 
-def hour_to_12(h: int) -> int:
+def hour_to_12(h):
     h = h % 12
     return 12 if h == 0 else h
 
 
-def ampm(h: int) -> str:
+def ampm(h):
     return "am" if h < 12 else "pm"
 
 
 def build_slug(dt):
-    month = dt.strftime("%B").lower()
-    day = dt.day
-    year = dt.year
-    hour = hour_to_12(dt.hour)
-    suffix = ampm(dt.hour)
-    return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour}{suffix}-et"
+    return f"bitcoin-up-or-down-{dt.strftime('%B').lower()}-{dt.day}-{dt.year}-{hour_to_12(dt.hour)}{ampm(dt.hour)}-et"
 
 
-def get_market(slug: str):
+def get_market(slug):
     try:
         url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
         r = requests.get(url, timeout=10)
         if r.status_code == 404:
             return None
-        r.raise_for_status()
         return r.json()
     except:
         return None
 
 
 def find_market(now):
-    candidates = [
-        now,
-        now - timedelta(hours=1),
-        now + timedelta(hours=1),
-    ]
-
-    for dt in candidates:
+    for dt in [now, now - timedelta(hours=1), now + timedelta(hours=1)]:
         slug = build_slug(dt)
         market = get_market(slug)
         if market:
             return slug, market
-
     return None, None
 
 
-def in_no_trade_window(now_et: datetime) -> bool:
+def in_no_trade_window(now):
     if hour_started_at is None:
         return True
-    seconds_since_hour_start = (now_et - hour_started_at).total_seconds()
-    return seconds_since_hour_start < (NO_TRADE_MINUTES * 60)
+    return (now - hour_started_at).total_seconds() < NO_TRADE_MINUTES * 60
 
 
 # =========================
-# FILTERED EVALUATION
+# TRADE PLAN LOGIC
 # =========================
-def evaluate_signal(btc: float, hour_open: float, yes: float, no: float):
-    move = btc - hour_open
+def build_trade_plan(edge, action):
+    edge_cents = edge * 100
+
+    if edge_cents < 25:
+        tier = "SMALL"
+        unit = "0.5u"
+        tp = "+6 to +8¢"
+        sl = "-4 to -5¢"
+        time_stop = "10–12 min"
+    elif edge_cents < 40:
+        tier = "MEDIUM"
+        unit = "1u"
+        tp = "+8 to +12¢"
+        sl = "-5 to -7¢"
+        time_stop = "15–20 min"
+    else:
+        tier = "LARGE"
+        unit = "1.5u"
+        tp = "Scale: +10¢ / +15–20¢"
+        sl = "-6 to -8¢"
+        time_stop = "20–30 min"
+
+    return tier, unit, tp, sl, time_stop
+
+
+# =========================
+# SIGNAL LOGIC
+# =========================
+def evaluate_signal(btc, open_price, yes, no):
+    move = btc - open_price
     abs_move = abs(move)
 
-    # 1) Require meaningful move from hour open
     if abs_move < MOVE_THRESHOLD:
-        return None, 0.0, move, "MOVE_TOO_SMALL"
+        return None, 0, move
 
-    # 2) Direction filter
     if move > 0:
         edge = 0.75 - yes
         if edge >= EDGE_THRESHOLD:
-            return "BUY UP", edge, move, "VALID_UP"
-        return None, edge, move, "EDGE_TOO_SMALL_UP"
+            return "BUY UP", edge, move
 
     if move < 0:
         edge = 0.75 - no
         if edge >= EDGE_THRESHOLD:
-            return "BUY DOWN", edge, move, "VALID_DOWN"
-        return None, edge, move, "EDGE_TOO_SMALL_DOWN"
+            return "BUY DOWN", edge, move
 
-    return None, 0.0, move, "NO_SIGNAL"
+    return None, 0, move
 
 
 # =========================
@@ -144,61 +149,36 @@ def evaluate_signal(btc: float, hour_open: float, yes: float, no: float):
 while True:
     try:
         btc = get_btc_price()
-        now_et = datetime.now(ET)
+        now = datetime.now(ET)
 
-        slug, market = find_market(now_et)
+        slug, market = find_market(now)
 
         if not market:
-            print("No market found...")
             time.sleep(CHECK_SECONDS)
             continue
 
-        # Switch to new market
         if slug != current_slug:
             current_slug = slug
             hour_open_price = btc
-            hour_started_at = now_et.replace(minute=0, second=0, microsecond=0)
+            hour_started_at = now.replace(minute=0, second=0, microsecond=0)
 
-            last_alert_side = None
             pending_action = None
             pending_count = 0
-
-            print("SWITCHED MARKET:", slug)
-            print("Hour open:", hour_open_price)
-            print("Hour started at:", hour_started_at)
+            last_alert_side = None
 
             time.sleep(CHECK_SECONDS)
             continue
 
         yes, no = parse_prices(market["outcomePrices"])
+        action, edge, move = evaluate_signal(btc, hour_open_price, yes, no)
 
-        action, edge, move, reason = evaluate_signal(
-            btc=btc,
-            hour_open=hour_open_price,
-            yes=yes,
-            no=no
-        )
-
-        # 3) No-trade window after new hour starts
-        if in_no_trade_window(now_et):
-            print(
-                "DEBUG |",
-                "BTC:", btc,
-                "OPEN:", hour_open_price,
-                "MOVE:", round(move, 2),
-                "YES:", yes,
-                "NO:", no,
-                "EDGE:", round(edge, 4),
-                "ACTION:", action,
-                "REASON:", "NO_TRADE_WINDOW",
-                "SLUG:", slug,
-            )
+        if in_no_trade_window(now):
             pending_action = None
             pending_count = 0
             time.sleep(CHECK_SECONDS)
             continue
 
-        # 4) Persistence confirmation
+        # confirmation logic
         if action:
             if action == pending_action:
                 pending_count += 1
@@ -209,31 +189,14 @@ while True:
             pending_action = None
             pending_count = 0
 
-        confirmed = action is not None and pending_count >= CONFIRMATION_CHECKS
-
-        print(
-            "DEBUG |",
-            "BTC:", btc,
-            "OPEN:", hour_open_price,
-            "MOVE:", round(move, 2),
-            "YES:", yes,
-            "NO:", no,
-            "EDGE:", round(edge, 4),
-            "ACTION:", action,
-            "PENDING:", pending_action,
-            "COUNT:", pending_count,
-            "CONFIRMED:", confirmed,
-            "REASON:", reason,
-            "SLUG:", slug,
-        )
+        confirmed = pending_count >= CONFIRMATION_CHECKS
 
         now_ts = time.time()
 
-        if (
-            confirmed
-            and (now_ts - last_alert_time > COOLDOWN_SECONDS)
-            and action != last_alert_side
-        ):
+        if confirmed and (now_ts - last_alert_time > COOLDOWN_SECONDS) and action != last_alert_side:
+
+            tier, unit, tp, sl, time_stop = build_trade_plan(edge, action)
+
             link = f"https://polymarket.com/event/{slug}"
 
             send_alert(
@@ -244,7 +207,13 @@ while True:
                 f"Move: {move:.2f}\n"
                 f"YES: {yes}\n"
                 f"NO: {no}\n"
-                f"Edge: {edge*100:.1f}¢\n"
+                f"Edge: {edge*100:.1f}¢\n\n"
+                f"📊 TRADE PLAN\n"
+                f"Tier: {tier}\n"
+                f"Size: {unit}\n"
+                f"Take Profit: {tp}\n"
+                f"Stop Loss: {sl}\n"
+                f"Time Stop: {time_stop}\n\n"
                 f"{link}"
             )
 
