@@ -680,10 +680,6 @@ while True:
         abs_move = abs(move)
         edge_cents = edge * 100
 
-        if abs_move < SMALL_MOVE_THRESHOLD:
-            time.sleep(CHECK_SECONDS)
-            continue
-
         if edge_cents < MIN_EDGE_CENTS:
             time.sleep(CHECK_SECONDS)
             continue
