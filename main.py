@@ -11,22 +11,32 @@ CHAT_ID = os.getenv("CHAT_ID")
 # =========================
 # SETTINGS
 # =========================
-EDGE_THRESHOLD = 0.15
-MOVE_THRESHOLD = 15.0
 CHECK_SECONDS = 1
-COOLDOWN_SECONDS = 180
+COOLDOWN_SECONDS = 120
 NO_TRADE_MINUTES = 5
 CONFIRMATION_CHECKS = 2
 
+# Core signal thresholds
+EDGE_THRESHOLD = 0.15
+CORE_MIN_MOVE = 15.0
+CORE_MAX_MOVE = 60.0
+
+# Extreme / pullback logic
+EXTREME_TRIGGER_MOVE = 80.0
+EXTREME_BLOCK_MOVE = 100.0
+PULLBACK_RETRACE_POINTS = 20.0
+PULLBACK_EXPIRY_SECONDS = 12 * 60
+
+# Entry / stack controls
+MAX_ENTRIES_PER_SIDE_PER_HOUR = 2
+BLOCK_SMALL_TRADES = True
+
 # Simulation settings
 SIM_MODE = True
-SIM_TP_SMALL = 0.08
 SIM_TP_MED = 0.10
 SIM_TP_LARGE = 0.15
-SIM_SL_SMALL = 0.05
 SIM_SL_MED = 0.06
 SIM_SL_LARGE = 0.07
-SIM_TIME_STOP_SMALL = 12 * 60
 SIM_TIME_STOP_MED = 15 * 60
 SIM_TIME_STOP_LARGE = 20 * 60
 
@@ -43,10 +53,24 @@ pending_action = None
 pending_count = 0
 
 last_alert_time = 0
-last_alert_side = None
 
 sim_trades = []
 sim_trade_counter = 0
+
+# Track how many entries we take per hour/side
+hour_entry_counts = {}
+
+# Pullback watch:
+# key = (slug, action)
+# value = {
+#   "action": action,
+#   "slug": slug,
+#   "direction": "UP" or "DOWN",
+#   "extreme_btc": float,
+#   "created_ts": float,
+#   "armed": bool
+# }
+pullback_watches = {}
 
 
 # =========================
@@ -119,10 +143,14 @@ def current_side_price(action: str, yes: float, no: float) -> float:
     return yes if action == "BUY UP" else no
 
 
+def get_direction_from_move(move: float) -> str:
+    return "UP" if move > 0 else "DOWN"
+
+
 def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
     move = btc - open_price
 
-    if abs(move) < MOVE_THRESHOLD:
+    if abs(move) < CORE_MIN_MOVE:
         return None, 0.0, move
 
     if move > 0:
@@ -148,9 +176,9 @@ def build_trade_plan(edge: float, action: str, yes: float, no: float):
         sl_text = "-4 to -5c"
         time_text = "10-12 min"
         entry_slip = 0.01
-        sim_tp = SIM_TP_SMALL
-        sim_sl = SIM_SL_SMALL
-        sim_time_stop = SIM_TIME_STOP_SMALL
+        sim_tp = 0.08
+        sim_sl = 0.05
+        sim_time_stop = 12 * 60
     elif edge_cents < 40:
         tier = "MEDIUM"
         unit = "1u"
@@ -200,10 +228,90 @@ def get_entry_quality(price_now: float, entry_min: float, entry_mid: float, entr
     return "LATE"
 
 
+def get_entry_count_key(slug: str, action: str):
+    return f"{slug}|{action}"
+
+
+def can_take_more_entries(slug: str, action: str) -> bool:
+    key = get_entry_count_key(slug, action)
+    return hour_entry_counts.get(key, 0) < MAX_ENTRIES_PER_SIDE_PER_HOUR
+
+
+def increment_entry_count(slug: str, action: str):
+    key = get_entry_count_key(slug, action)
+    hour_entry_counts[key] = hour_entry_counts.get(key, 0) + 1
+
+
+# =========================
+# PULLBACK WATCH LOGIC
+# =========================
+def update_pullback_watch(slug: str, action: str, move: float, btc: float, now_ts: float):
+    direction = get_direction_from_move(move)
+    key = (slug, action)
+
+    if abs(move) < EXTREME_TRIGGER_MOVE:
+        if key in pullback_watches:
+            del pullback_watches[key]
+        return
+
+    existing = pullback_watches.get(key)
+
+    if existing is None:
+        pullback_watches[key] = {
+            "action": action,
+            "slug": slug,
+            "direction": direction,
+            "extreme_btc": btc,
+            "created_ts": now_ts,
+            "armed": True,
+        }
+        return
+
+    # Update most extreme BTC point seen in trend
+    if direction == "DOWN":
+        if btc < existing["extreme_btc"]:
+            existing["extreme_btc"] = btc
+            existing["created_ts"] = now_ts
+    else:
+        if btc > existing["extreme_btc"]:
+            existing["extreme_btc"] = btc
+            existing["created_ts"] = now_ts
+
+
+def pullback_retrace_met(slug: str, action: str, btc: float) -> bool:
+    key = (slug, action)
+    watch = pullback_watches.get(key)
+
+    if not watch:
+        return False
+
+    if not watch["armed"]:
+        return False
+
+    if watch["direction"] == "DOWN":
+        # Need bounce UP from the extreme low
+        retrace = btc - watch["extreme_btc"]
+        return retrace >= PULLBACK_RETRACE_POINTS
+    else:
+        # Need pullback DOWN from the extreme high
+        retrace = watch["extreme_btc"] - btc
+        return retrace >= PULLBACK_RETRACE_POINTS
+
+
+def expire_old_pullback_watches(now_ts: float):
+    to_delete = []
+    for key, watch in pullback_watches.items():
+        if now_ts - watch["created_ts"] > PULLBACK_EXPIRY_SECONDS:
+            to_delete.append(key)
+
+    for key in to_delete:
+        del pullback_watches[key]
+
+
 # =========================
 # SIMULATION
 # =========================
-def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, slug: str):
+def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, slug: str, setup_type: str):
     global sim_trades, sim_trade_counter
 
     sim_trade_counter += 1
@@ -219,6 +327,7 @@ def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, 
         "time_stop": plan["sim_time_stop"],
         "start": now_ts,
         "slug": slug,
+        "setup_type": setup_type,
         "active": True,
         "max_fav": 0.0,
         "max_adv": 0.0,
@@ -229,6 +338,7 @@ def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, 
     send_alert(
         f"SIM START #{trade_id}\n"
         f"{action}\n"
+        f"Setup: {setup_type}\n"
         f"Entry: {entry_price}\n"
         f"Tier: {plan['tier']}\n"
         f"TP Target: +{plan['sim_tp']:.3f}\n"
@@ -257,6 +367,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
                 f"SIM RESULT #{trade['id']}\n"
                 f"TP HIT\n"
                 f"Action: {trade['action']}\n"
+                f"Setup: {trade['setup_type']}\n"
                 f"Entry: {trade['entry']}\n"
                 f"Exit: {price_now}\n"
                 f"PnL: {pnl:.3f}\n"
@@ -271,6 +382,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
                 f"SIM RESULT #{trade['id']}\n"
                 f"SL HIT\n"
                 f"Action: {trade['action']}\n"
+                f"Setup: {trade['setup_type']}\n"
                 f"Entry: {trade['entry']}\n"
                 f"Exit: {price_now}\n"
                 f"PnL: {pnl:.3f}\n"
@@ -285,6 +397,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
                 f"SIM RESULT #{trade['id']}\n"
                 f"TIME EXIT\n"
                 f"Action: {trade['action']}\n"
+                f"Setup: {trade['setup_type']}\n"
                 f"Entry: {trade['entry']}\n"
                 f"Exit: {price_now}\n"
                 f"PnL: {pnl:.3f}\n"
@@ -293,8 +406,117 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
             )
             trade["active"] = False
 
-    # Keep list tidy
     sim_trades = [t for t in sim_trades if t["active"]]
+
+
+# =========================
+# ALERT / ENTRY HANDLERS
+# =========================
+def handle_core_entry(slug: str, action: str, edge: float, move: float, btc: float, yes: float, no: float, now_ts: float):
+    global last_alert_time
+
+    if not can_take_more_entries(slug, action):
+        return
+
+    plan = build_trade_plan(edge, action, yes, no)
+
+    if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
+        return
+
+    price_now = current_side_price(action, yes, no)
+    entry_quality = get_entry_quality(price_now, plan["entry_min"], plan["entry_mid"], plan["entry_max"])
+    link = f"https://polymarket.com/event/{slug}"
+
+    send_alert(
+        f"MISPRICE\n"
+        f"{action}\n"
+        f"Setup: CORE\n"
+        f"BTC: {btc}\n"
+        f"Hour Open: {hour_open_price}\n"
+        f"Move: {move:.2f}\n"
+        f"YES: {yes}\n"
+        f"NO: {no}\n"
+        f"Edge: {edge*100:.1f}c\n\n"
+        f"ENTRY QUALITY\n"
+        f"{entry_quality}\n\n"
+        f"ENTRY MIN: {plan['entry_min']}\n"
+        f"ENTRY MID: {plan['entry_mid']}\n"
+        f"ENTRY MAX: {plan['entry_max']}\n\n"
+        f"{plan['tier']} | {plan['unit']}\n"
+        f"TP: {plan['tp_text']}\n"
+        f"SL: {plan['sl_text']}\n"
+        f"TIME: {plan['time_text']}\n\n"
+        f"{link}"
+    )
+
+    if SIM_MODE:
+        start_sim_trade(
+            action=action,
+            entry_price=plan["entry_mid"],
+            plan=plan,
+            now_ts=now_ts,
+            slug=slug,
+            setup_type="CORE",
+        )
+
+    increment_entry_count(slug, action)
+    last_alert_time = now_ts
+
+
+def handle_pullback_entry(slug: str, action: str, edge: float, move: float, btc: float, yes: float, no: float, now_ts: float):
+    global last_alert_time
+
+    if not can_take_more_entries(slug, action):
+        return
+
+    plan = build_trade_plan(edge, action, yes, no)
+
+    if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
+        return
+
+    price_now = current_side_price(action, yes, no)
+    entry_quality = get_entry_quality(price_now, plan["entry_min"], plan["entry_mid"], plan["entry_max"])
+    link = f"https://polymarket.com/event/{slug}"
+
+    send_alert(
+        f"PULLBACK ENTRY\n"
+        f"{action}\n"
+        f"Setup: EXTREME PULLBACK\n"
+        f"BTC: {btc}\n"
+        f"Hour Open: {hour_open_price}\n"
+        f"Move: {move:.2f}\n"
+        f"YES: {yes}\n"
+        f"NO: {no}\n"
+        f"Edge: {edge*100:.1f}c\n\n"
+        f"ENTRY QUALITY\n"
+        f"{entry_quality}\n\n"
+        f"ENTRY MIN: {plan['entry_min']}\n"
+        f"ENTRY MID: {plan['entry_mid']}\n"
+        f"ENTRY MAX: {plan['entry_max']}\n\n"
+        f"{plan['tier']} | {plan['unit']}\n"
+        f"TP: {plan['tp_text']}\n"
+        f"SL: {plan['sl_text']}\n"
+        f"TIME: {plan['time_text']}\n\n"
+        f"{link}"
+    )
+
+    if SIM_MODE:
+        start_sim_trade(
+            action=action,
+            entry_price=plan["entry_mid"],
+            plan=plan,
+            now_ts=now_ts,
+            slug=slug,
+            setup_type="EXTREME_PULLBACK",
+        )
+
+    increment_entry_count(slug, action)
+    last_alert_time = now_ts
+
+    # consume pullback watch
+    key = (slug, action)
+    if key in pullback_watches:
+        del pullback_watches[key]
 
 
 # =========================
@@ -316,15 +538,20 @@ while True:
             current_slug = slug
             hour_open_price = btc
             hour_started_at = now.replace(minute=0, second=0, microsecond=0)
+
             pending_action = None
             pending_count = 0
-            last_alert_side = None
+            last_alert_time = 0
+
+            hour_entry_counts = {}
+            pullback_watches = {}
+
             time.sleep(CHECK_SECONDS)
             continue
 
         yes, no = parse_prices(market["outcomePrices"])
-
         update_sim_trades(yes, no, now_ts)
+        expire_old_pullback_watches(now_ts)
 
         action, edge, move = evaluate_signal(btc, hour_open_price, yes, no)
 
@@ -346,50 +573,41 @@ while True:
 
         confirmed = pending_count >= CONFIRMATION_CHECKS
 
-        if confirmed and (now_ts - last_alert_time > COOLDOWN_SECONDS):
-            plan = build_trade_plan(edge, action, yes, no)
-            side_price_now = current_side_price(action, yes, no)
-            entry_quality = get_entry_quality(
-                side_price_now,
-                plan["entry_min"],
-                plan["entry_mid"],
-                plan["entry_max"],
-            )
+        if not confirmed:
+            time.sleep(CHECK_SECONDS)
+            continue
 
-            link = f"https://polymarket.com/event/{slug}"
+        if now_ts - last_alert_time < COOLDOWN_SECONDS:
+            time.sleep(CHECK_SECONDS)
+            continue
 
-            send_alert(
-                f"MISPRICE\n"
-                f"{action}\n"
-                f"BTC: {btc}\n"
-                f"Hour Open: {hour_open_price}\n"
-                f"Move: {move:.2f}\n"
-                f"YES: {yes}\n"
-                f"NO: {no}\n"
-                f"Edge: {edge*100:.1f}c\n\n"
-                f"ENTRY QUALITY\n"
-                f"{entry_quality}\n\n"
-                f"ENTRY MIN: {plan['entry_min']}\n"
-                f"ENTRY MID: {plan['entry_mid']}\n"
-                f"ENTRY MAX: {plan['entry_max']}\n\n"
-                f"{plan['tier']} | {plan['unit']}\n"
-                f"TP: {plan['tp_text']}\n"
-                f"SL: {plan['sl_text']}\n"
-                f"TIME: {plan['time_text']}\n\n"
-                f"{link}"
-            )
+        abs_move = abs(move)
 
-            if SIM_MODE:
-                start_sim_trade(
-                    action=action,
-                    entry_price=plan["entry_mid"],
-                    plan=plan,
-                    now_ts=now_ts,
-                    slug=slug
-                )
+        # Update / arm pullback watch for extreme moves
+        if abs_move >= EXTREME_TRIGGER_MOVE and action:
+            update_pullback_watch(slug, action, move, btc, now_ts)
 
-            last_alert_time = now_ts
-            last_alert_side = action
+        # CORE MODE: 15 to 60
+        if CORE_MIN_MOVE <= abs_move <= CORE_MAX_MOVE and action:
+            handle_core_entry(slug, action, edge, move, btc, yes, no, now_ts)
+            time.sleep(CHECK_SECONDS)
+            continue
+
+        # MID ZONE: 60 to 100
+        # Still allow, but same core logic and stack limits
+        if CORE_MAX_MOVE < abs_move < EXTREME_BLOCK_MOVE and action:
+            handle_core_entry(slug, action, edge, move, btc, yes, no, now_ts)
+            time.sleep(CHECK_SECONDS)
+            continue
+
+        # EXTREME ZONE: 100+
+        # No direct entries. Pullback only.
+        if abs_move >= EXTREME_BLOCK_MOVE and action:
+            if pullback_retrace_met(slug, action, btc):
+                handle_pullback_entry(slug, action, edge, move, btc, yes, no, now_ts)
+
+            time.sleep(CHECK_SECONDS)
+            continue
 
         time.sleep(CHECK_SECONDS)
 
