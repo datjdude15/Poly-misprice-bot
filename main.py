@@ -45,18 +45,19 @@ pending_count = 0
 last_alert_time = 0
 last_alert_side = None
 
-sim_trade = None
+sim_trades = []
+sim_trade_counter = 0
 
 
 # =========================
 # HELPERS
 # =========================
-def send_alert(message):
+def send_alert(message: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=15)
 
 
-def get_btc_price():
+def get_btc_price() -> float:
     url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
@@ -69,16 +70,16 @@ def parse_prices(raw):
     return float(raw[0]), float(raw[1])
 
 
-def hour_to_12(h):
+def hour_to_12(h: int) -> int:
     h = h % 12
     return 12 if h == 0 else h
 
 
-def ampm(h):
+def ampm(h: int) -> str:
     return "am" if h < 12 else "pm"
 
 
-def build_slug(dt):
+def build_slug(dt: datetime) -> str:
     month = dt.strftime("%B").lower()
     day = dt.day
     year = dt.year
@@ -87,7 +88,7 @@ def build_slug(dt):
     return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour}{suffix}-et"
 
 
-def get_market(slug):
+def get_market(slug: str):
     try:
         url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
         r = requests.get(url, timeout=10)
@@ -99,7 +100,7 @@ def get_market(slug):
         return None
 
 
-def find_market(now):
+def find_market(now: datetime):
     for dt in [now, now - timedelta(hours=1), now + timedelta(hours=1)]:
         slug = build_slug(dt)
         market = get_market(slug)
@@ -108,17 +109,17 @@ def find_market(now):
     return None, None
 
 
-def in_no_trade_window(now):
+def in_no_trade_window(now: datetime) -> bool:
     if hour_started_at is None:
         return True
     return (now - hour_started_at).total_seconds() < NO_TRADE_MINUTES * 60
 
 
-def current_side_price(action, yes, no):
+def current_side_price(action: str, yes: float, no: float) -> float:
     return yes if action == "BUY UP" else no
 
 
-def evaluate_signal(btc, open_price, yes, no):
+def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
     move = btc - open_price
 
     if abs(move) < MOVE_THRESHOLD:
@@ -137,7 +138,7 @@ def evaluate_signal(btc, open_price, yes, no):
     return None, 0.0, move
 
 
-def build_trade_plan(edge, action, yes, no):
+def build_trade_plan(edge: float, action: str, yes: float, no: float):
     edge_cents = edge * 100
 
     if edge_cents < 25:
@@ -191,7 +192,7 @@ def build_trade_plan(edge, action, yes, no):
     }
 
 
-def get_entry_quality(price_now, entry_min, entry_mid, entry_max):
+def get_entry_quality(price_now: float, entry_min: float, entry_mid: float, entry_max: float) -> str:
     if price_now <= entry_mid:
         return "IDEAL"
     if price_now <= entry_max:
@@ -202,10 +203,14 @@ def get_entry_quality(price_now, entry_min, entry_mid, entry_max):
 # =========================
 # SIMULATION
 # =========================
-def start_sim_trade(action, entry_price, plan, now_ts, slug):
-    global sim_trade
+def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, slug: str):
+    global sim_trades, sim_trade_counter
 
-    sim_trade = {
+    sim_trade_counter += 1
+    trade_id = sim_trade_counter
+
+    trade = {
+        "id": trade_id,
         "action": action,
         "entry": entry_price,
         "tier": plan["tier"],
@@ -219,8 +224,10 @@ def start_sim_trade(action, entry_price, plan, now_ts, slug):
         "max_adv": 0.0,
     }
 
+    sim_trades.append(trade)
+
     send_alert(
-        f"SIM START\n"
+        f"SIM START #{trade_id}\n"
         f"{action}\n"
         f"Entry: {entry_price}\n"
         f"Tier: {plan['tier']}\n"
@@ -230,60 +237,64 @@ def start_sim_trade(action, entry_price, plan, now_ts, slug):
     )
 
 
-def update_sim_trade(yes, no, now_ts):
-    global sim_trade
+def update_sim_trades(yes: float, no: float, now_ts: float):
+    global sim_trades
 
-    if not sim_trade or not sim_trade["active"]:
-        return
+    for trade in sim_trades:
+        if not trade["active"]:
+            continue
 
-    price_now = yes if sim_trade["action"] == "BUY UP" else no
-    pnl = round(price_now - sim_trade["entry"], 3)
+        price_now = yes if trade["action"] == "BUY UP" else no
+        pnl = round(price_now - trade["entry"], 3)
 
-    if pnl > sim_trade["max_fav"]:
-        sim_trade["max_fav"] = pnl
-    if pnl < sim_trade["max_adv"]:
-        sim_trade["max_adv"] = pnl
+        if pnl > trade["max_fav"]:
+            trade["max_fav"] = pnl
+        if pnl < trade["max_adv"]:
+            trade["max_adv"] = pnl
 
-    if pnl >= sim_trade["tp"]:
-        send_alert(
-            f"SIM RESULT\n"
-            f"TP HIT\n"
-            f"Action: {sim_trade['action']}\n"
-            f"Entry: {sim_trade['entry']}\n"
-            f"Exit: {price_now}\n"
-            f"PnL: {pnl:.3f}\n"
-            f"Max Favorable: {sim_trade['max_fav']:.3f}\n"
-            f"Max Adverse: {sim_trade['max_adv']:.3f}"
-        )
-        sim_trade["active"] = False
-        return
+        if pnl >= trade["tp"]:
+            send_alert(
+                f"SIM RESULT #{trade['id']}\n"
+                f"TP HIT\n"
+                f"Action: {trade['action']}\n"
+                f"Entry: {trade['entry']}\n"
+                f"Exit: {price_now}\n"
+                f"PnL: {pnl:.3f}\n"
+                f"Max Favorable: {trade['max_fav']:.3f}\n"
+                f"Max Adverse: {trade['max_adv']:.3f}"
+            )
+            trade["active"] = False
+            continue
 
-    if pnl <= -sim_trade["sl"]:
-        send_alert(
-            f"SIM RESULT\n"
-            f"SL HIT\n"
-            f"Action: {sim_trade['action']}\n"
-            f"Entry: {sim_trade['entry']}\n"
-            f"Exit: {price_now}\n"
-            f"PnL: {pnl:.3f}\n"
-            f"Max Favorable: {sim_trade['max_fav']:.3f}\n"
-            f"Max Adverse: {sim_trade['max_adv']:.3f}"
-        )
-        sim_trade["active"] = False
-        return
+        if pnl <= -trade["sl"]:
+            send_alert(
+                f"SIM RESULT #{trade['id']}\n"
+                f"SL HIT\n"
+                f"Action: {trade['action']}\n"
+                f"Entry: {trade['entry']}\n"
+                f"Exit: {price_now}\n"
+                f"PnL: {pnl:.3f}\n"
+                f"Max Favorable: {trade['max_fav']:.3f}\n"
+                f"Max Adverse: {trade['max_adv']:.3f}"
+            )
+            trade["active"] = False
+            continue
 
-    if now_ts - sim_trade["start"] >= sim_trade["time_stop"]:
-        send_alert(
-            f"SIM RESULT\n"
-            f"TIME EXIT\n"
-            f"Action: {sim_trade['action']}\n"
-            f"Entry: {sim_trade['entry']}\n"
-            f"Exit: {price_now}\n"
-            f"PnL: {pnl:.3f}\n"
-            f"Max Favorable: {sim_trade['max_fav']:.3f}\n"
-            f"Max Adverse: {sim_trade['max_adv']:.3f}"
-        )
-        sim_trade["active"] = False
+        if now_ts - trade["start"] >= trade["time_stop"]:
+            send_alert(
+                f"SIM RESULT #{trade['id']}\n"
+                f"TIME EXIT\n"
+                f"Action: {trade['action']}\n"
+                f"Entry: {trade['entry']}\n"
+                f"Exit: {price_now}\n"
+                f"PnL: {pnl:.3f}\n"
+                f"Max Favorable: {trade['max_fav']:.3f}\n"
+                f"Max Adverse: {trade['max_adv']:.3f}"
+            )
+            trade["active"] = False
+
+    # Keep list tidy
+    sim_trades = [t for t in sim_trades if t["active"]]
 
 
 # =========================
@@ -313,7 +324,7 @@ while True:
 
         yes, no = parse_prices(market["outcomePrices"])
 
-        update_sim_trade(yes, no, now_ts)
+        update_sim_trades(yes, no, now_ts)
 
         action, edge, move = evaluate_signal(btc, hour_open_price, yes, no)
 
@@ -368,8 +379,7 @@ while True:
                 f"{link}"
             )
 
-            # Start a sim trade only if there isn't already one active
-            if SIM_MODE and (sim_trade is None or not sim_trade["active"]):
+            if SIM_MODE:
                 start_sim_trade(
                     action=action,
                     entry_price=plan["entry_mid"],
