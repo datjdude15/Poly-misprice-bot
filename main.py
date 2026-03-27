@@ -18,7 +18,8 @@ CONFIRMATION_CHECKS = 2
 
 # Core signal thresholds
 EDGE_THRESHOLD = 0.15
-CORE_MIN_MOVE = 15.0
+MIN_MOVE_FOR_ENTRY = 20.0
+CORE_MIN_MOVE = 20.0
 CORE_MAX_MOVE = 60.0
 
 # Extreme / pullback logic
@@ -30,11 +31,22 @@ PULLBACK_EXPIRY_SECONDS = 12 * 60
 # Entry / stack controls
 MAX_ENTRIES_PER_SIDE_PER_HOUR = 2
 BLOCK_SMALL_TRADES = True
+SMALL_MOVE_THRESHOLD = 18.0
 
-# Smart stacking
+# Smart stacking v2.2
 SMART_STACKING_ENABLED = True
-SMART_STACK_PROFIT_TRIGGER = 0.03
-SMART_STACK_MAX_MOVE = 70.0
+SMART_STACK_PROFIT_TRIGGER = 0.07
+SMART_STACK_MIN_MOVE = 25.0
+SMART_STACK_MAX_MOVE = 60.0
+SMART_STACK_MAX_PER_SIDE_PER_HOUR = 1
+
+# Reversal confirmation
+REVERSAL_REQUIRED = True
+MIN_REVERSAL_SIZE = 5.0
+
+# Momentum continuation block
+STACK_BLOCK_IF_MOMENTUM = True
+MOMENTUM_CONTINUATION_BLOCK = True
 
 # Simulation settings
 SIM_MODE = True
@@ -56,17 +68,22 @@ current_slug = None
 
 pending_action = None
 pending_count = 0
-
 last_alert_time = 0
 
 sim_trades = []
 sim_trade_counter = 0
 
-# Track how many entries we take per hour/side
+# count all entries per side per hour
 hour_entry_counts = {}
+# count only smart-stack adds per side per hour
+hour_stack_counts = {}
 
-# Pullback watches
+# pullback watch
 pullback_watches = {}
+
+# move tracking for reversal / momentum checks
+recent_moves = []   # list of floats, capped small
+recent_btcs = []    # list of floats, capped small
 
 
 # =========================
@@ -146,7 +163,7 @@ def get_direction_from_move(move: float) -> str:
 def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
     move = btc - open_price
 
-    if abs(move) < CORE_MIN_MOVE:
+    if abs(move) < MIN_MOVE_FOR_ENTRY:
         return None, 0.0, move
 
     if move > 0:
@@ -238,6 +255,77 @@ def increment_entry_count(slug: str, action: str):
     hour_entry_counts[key] = hour_entry_counts.get(key, 0) + 1
 
 
+def get_stack_count_key(slug: str, action: str):
+    return f"{slug}|{action}|stack"
+
+
+def can_take_more_stacks(slug: str, action: str) -> bool:
+    key = get_stack_count_key(slug, action)
+    return hour_stack_counts.get(key, 0) < SMART_STACK_MAX_PER_SIDE_PER_HOUR
+
+
+def increment_stack_count(slug: str, action: str):
+    key = get_stack_count_key(slug, action)
+    hour_stack_counts[key] = hour_stack_counts.get(key, 0) + 1
+
+
+# =========================
+# MOVE HISTORY / CONFIRMATION
+# =========================
+def update_recent_state(move: float, btc: float):
+    recent_moves.append(move)
+    recent_btcs.append(btc)
+
+    if len(recent_moves) > 10:
+        recent_moves.pop(0)
+    if len(recent_btcs) > 10:
+        recent_btcs.pop(0)
+
+
+def reversal_confirmed(action: str) -> bool:
+    if not REVERSAL_REQUIRED:
+        return True
+
+    if len(recent_btcs) < 3:
+        return False
+
+    b0 = recent_btcs[-3]
+    b1 = recent_btcs[-2]
+    b2 = recent_btcs[-1]
+
+    if action == "BUY DOWN":
+        # Need small bounce upward off the low before fade
+        return (b2 - min(b0, b1)) >= MIN_REVERSAL_SIZE
+
+    if action == "BUY UP":
+        # Need small pullback downward off the high before fade
+        return (max(b0, b1) - b2) >= MIN_REVERSAL_SIZE
+
+    return False
+
+
+def momentum_still_extending(action: str) -> bool:
+    if not MOMENTUM_CONTINUATION_BLOCK:
+        return False
+
+    if len(recent_moves) < 3:
+        return False
+
+    m0 = recent_moves[-3]
+    m1 = recent_moves[-2]
+    m2 = recent_moves[-1]
+
+    if action == "BUY DOWN":
+        # Move still getting more negative
+        return m2 < m1 < m0
+
+    if action == "BUY UP":
+        # Move still getting more positive
+        return m2 > m1 > m0
+
+    return False
+
+
 # =========================
 # PULLBACK WATCH LOGIC
 # =========================
@@ -311,6 +399,8 @@ def find_best_active_trade(slug: str, action: str, yes: float, no: float):
             continue
         if trade["action"] != action:
             continue
+        if trade["setup_type"] not in ("CORE", "EXTREME_PULLBACK"):
+            continue
 
         pnl = round(current_price - trade["entry"], 3)
         candidates.append((pnl, trade))
@@ -326,7 +416,18 @@ def smart_stack_allowed(slug: str, action: str, move: float, yes: float, no: flo
     if not SMART_STACKING_ENABLED:
         return False
 
-    if abs(move) > SMART_STACK_MAX_MOVE:
+    abs_move = abs(move)
+
+    if abs_move < SMART_STACK_MIN_MOVE:
+        return False
+
+    if abs_move > SMART_STACK_MAX_MOVE:
+        return False
+
+    if not can_take_more_stacks(slug, action):
+        return False
+
+    if STACK_BLOCK_IF_MOMENTUM and momentum_still_extending(action):
         return False
 
     best_pnl, best_trade = find_best_active_trade(slug, action, yes, no)
@@ -491,10 +592,14 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
         )
 
     increment_entry_count(slug, action)
+
+    if setup_type in ("SMART_STACK", "EXTREME_PULLBACK_STACK"):
+        increment_stack_count(slug, action)
+
     last_alert_time = now_ts
 
     key = (slug, action)
-    if key in pullback_watches and setup_type == "EXTREME_PULLBACK":
+    if key in pullback_watches and setup_type in ("EXTREME_PULLBACK", "EXTREME_PULLBACK_STACK"):
         del pullback_watches[key]
 
 
@@ -523,16 +628,20 @@ while True:
             last_alert_time = 0
 
             hour_entry_counts = {}
+            hour_stack_counts = {}
             pullback_watches = {}
+            recent_moves = []
+            recent_btcs = []
 
             time.sleep(CHECK_SECONDS)
             continue
 
         yes, no = parse_prices(market["outcomePrices"])
+        action, edge, move = evaluate_signal(btc, hour_open_price, yes, no)
+
+        update_recent_state(move, btc)
         update_sim_trades(yes, no, now_ts)
         expire_old_pullback_watches(now_ts)
-
-        action, edge, move = evaluate_signal(btc, hour_open_price, yes, no)
 
         if in_no_trade_window(now):
             pending_action = None
@@ -562,20 +671,27 @@ while True:
 
         abs_move = abs(move)
 
+        if abs_move < SMALL_MOVE_THRESHOLD:
+            time.sleep(CHECK_SECONDS)
+            continue
+
         if abs_move >= EXTREME_TRIGGER_MOVE and action:
             update_pullback_watch(slug, action, move, btc, now_ts)
 
-        # Core / mid zone direct entries
+        # CORE / MID RANGE
         if action and CORE_MIN_MOVE <= abs_move < EXTREME_BLOCK_MOVE:
+            if not reversal_confirmed(action):
+                time.sleep(CHECK_SECONDS)
+                continue
+
             if smart_stack_allowed(slug, action, move, yes, no):
                 handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "SMART_STACK")
                 time.sleep(CHECK_SECONDS)
                 continue
 
-            # allow first entry even if no profitable parent exists yet
             if can_take_more_entries(slug, action):
-                existing_key = get_entry_count_key(slug, action)
-                if hour_entry_counts.get(existing_key, 0) == 0:
+                key = get_entry_count_key(slug, action)
+                if hour_entry_counts.get(key, 0) == 0:
                     handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "CORE")
                     time.sleep(CHECK_SECONDS)
                     continue
@@ -583,16 +699,20 @@ while True:
             time.sleep(CHECK_SECONDS)
             continue
 
-        # Extreme zone: pullback only
+        # EXTREME RANGE = PULLBACK ONLY
         if action and abs_move >= EXTREME_BLOCK_MOVE:
             if pullback_retrace_met(slug, action, btc):
+                if not reversal_confirmed(action):
+                    time.sleep(CHECK_SECONDS)
+                    continue
+
                 if smart_stack_allowed(slug, action, move, yes, no):
                     handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK_STACK")
                     time.sleep(CHECK_SECONDS)
                     continue
 
-                existing_key = get_entry_count_key(slug, action)
-                if hour_entry_counts.get(existing_key, 0) == 0:
+                key = get_entry_count_key(slug, action)
+                if hour_entry_counts.get(key, 0) == 0:
                     handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK")
                     time.sleep(CHECK_SECONDS)
                     continue
