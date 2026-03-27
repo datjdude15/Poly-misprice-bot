@@ -12,7 +12,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 # SETTINGS
 # =========================
 CHECK_SECONDS = 1
-COOLDOWN_SECONDS = 120
+COOLDOWN_SECONDS = 60
 NO_TRADE_MINUTES = 5
 CONFIRMATION_CHECKS = 2
 
@@ -30,6 +30,11 @@ PULLBACK_EXPIRY_SECONDS = 12 * 60
 # Entry / stack controls
 MAX_ENTRIES_PER_SIDE_PER_HOUR = 2
 BLOCK_SMALL_TRADES = True
+
+# Smart stacking
+SMART_STACKING_ENABLED = True
+SMART_STACK_PROFIT_TRIGGER = 0.03
+SMART_STACK_MAX_MOVE = 70.0
 
 # Simulation settings
 SIM_MODE = True
@@ -60,16 +65,7 @@ sim_trade_counter = 0
 # Track how many entries we take per hour/side
 hour_entry_counts = {}
 
-# Pullback watch:
-# key = (slug, action)
-# value = {
-#   "action": action,
-#   "slug": slug,
-#   "direction": "UP" or "DOWN",
-#   "extreme_btc": float,
-#   "created_ts": float,
-#   "armed": bool
-# }
+# Pullback watches
 pullback_watches = {}
 
 
@@ -267,7 +263,6 @@ def update_pullback_watch(slug: str, action: str, move: float, btc: float, now_t
         }
         return
 
-    # Update most extreme BTC point seen in trend
     if direction == "DOWN":
         if btc < existing["extreme_btc"]:
             existing["extreme_btc"] = btc
@@ -282,18 +277,13 @@ def pullback_retrace_met(slug: str, action: str, btc: float) -> bool:
     key = (slug, action)
     watch = pullback_watches.get(key)
 
-    if not watch:
-        return False
-
-    if not watch["armed"]:
+    if not watch or not watch["armed"]:
         return False
 
     if watch["direction"] == "DOWN":
-        # Need bounce UP from the extreme low
         retrace = btc - watch["extreme_btc"]
         return retrace >= PULLBACK_RETRACE_POINTS
     else:
-        # Need pullback DOWN from the extreme high
         retrace = watch["extreme_btc"] - btc
         return retrace >= PULLBACK_RETRACE_POINTS
 
@@ -303,9 +293,50 @@ def expire_old_pullback_watches(now_ts: float):
     for key, watch in pullback_watches.items():
         if now_ts - watch["created_ts"] > PULLBACK_EXPIRY_SECONDS:
             to_delete.append(key)
-
     for key in to_delete:
         del pullback_watches[key]
+
+
+# =========================
+# SMART STACKING
+# =========================
+def find_best_active_trade(slug: str, action: str, yes: float, no: float):
+    candidates = []
+    current_price = current_side_price(action, yes, no)
+
+    for trade in sim_trades:
+        if not trade["active"]:
+            continue
+        if trade["slug"] != slug:
+            continue
+        if trade["action"] != action:
+            continue
+
+        pnl = round(current_price - trade["entry"], 3)
+        candidates.append((pnl, trade))
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0]
+
+
+def smart_stack_allowed(slug: str, action: str, move: float, yes: float, no: float) -> bool:
+    if not SMART_STACKING_ENABLED:
+        return False
+
+    if abs(move) > SMART_STACK_MAX_MOVE:
+        return False
+
+    best_pnl, best_trade = find_best_active_trade(slug, action, yes, no)
+    if best_trade is None:
+        return False
+
+    if best_pnl is None or best_pnl < SMART_STACK_PROFIT_TRIGGER:
+        return False
+
+    return True
 
 
 # =========================
@@ -412,7 +443,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
 # =========================
 # ALERT / ENTRY HANDLERS
 # =========================
-def handle_core_entry(slug: str, action: str, edge: float, move: float, btc: float, yes: float, no: float, now_ts: float):
+def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, yes: float, no: float, now_ts: float, setup_type: str):
     global last_alert_time
 
     if not can_take_more_entries(slug, action):
@@ -430,7 +461,7 @@ def handle_core_entry(slug: str, action: str, edge: float, move: float, btc: flo
     send_alert(
         f"MISPRICE\n"
         f"{action}\n"
-        f"Setup: CORE\n"
+        f"Setup: {setup_type}\n"
         f"BTC: {btc}\n"
         f"Hour Open: {hour_open_price}\n"
         f"Move: {move:.2f}\n"
@@ -456,66 +487,14 @@ def handle_core_entry(slug: str, action: str, edge: float, move: float, btc: flo
             plan=plan,
             now_ts=now_ts,
             slug=slug,
-            setup_type="CORE",
+            setup_type=setup_type,
         )
 
     increment_entry_count(slug, action)
     last_alert_time = now_ts
 
-
-def handle_pullback_entry(slug: str, action: str, edge: float, move: float, btc: float, yes: float, no: float, now_ts: float):
-    global last_alert_time
-
-    if not can_take_more_entries(slug, action):
-        return
-
-    plan = build_trade_plan(edge, action, yes, no)
-
-    if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
-        return
-
-    price_now = current_side_price(action, yes, no)
-    entry_quality = get_entry_quality(price_now, plan["entry_min"], plan["entry_mid"], plan["entry_max"])
-    link = f"https://polymarket.com/event/{slug}"
-
-    send_alert(
-        f"PULLBACK ENTRY\n"
-        f"{action}\n"
-        f"Setup: EXTREME PULLBACK\n"
-        f"BTC: {btc}\n"
-        f"Hour Open: {hour_open_price}\n"
-        f"Move: {move:.2f}\n"
-        f"YES: {yes}\n"
-        f"NO: {no}\n"
-        f"Edge: {edge*100:.1f}c\n\n"
-        f"ENTRY QUALITY\n"
-        f"{entry_quality}\n\n"
-        f"ENTRY MIN: {plan['entry_min']}\n"
-        f"ENTRY MID: {plan['entry_mid']}\n"
-        f"ENTRY MAX: {plan['entry_max']}\n\n"
-        f"{plan['tier']} | {plan['unit']}\n"
-        f"TP: {plan['tp_text']}\n"
-        f"SL: {plan['sl_text']}\n"
-        f"TIME: {plan['time_text']}\n\n"
-        f"{link}"
-    )
-
-    if SIM_MODE:
-        start_sim_trade(
-            action=action,
-            entry_price=plan["entry_mid"],
-            plan=plan,
-            now_ts=now_ts,
-            slug=slug,
-            setup_type="EXTREME_PULLBACK",
-        )
-
-    increment_entry_count(slug, action)
-    last_alert_time = now_ts
-
-    # consume pullback watch
     key = (slug, action)
-    if key in pullback_watches:
+    if key in pullback_watches and setup_type == "EXTREME_PULLBACK":
         del pullback_watches[key]
 
 
@@ -583,28 +562,40 @@ while True:
 
         abs_move = abs(move)
 
-        # Update / arm pullback watch for extreme moves
         if abs_move >= EXTREME_TRIGGER_MOVE and action:
             update_pullback_watch(slug, action, move, btc, now_ts)
 
-        # CORE MODE: 15 to 60
-        if CORE_MIN_MOVE <= abs_move <= CORE_MAX_MOVE and action:
-            handle_core_entry(slug, action, edge, move, btc, yes, no, now_ts)
+        # Core / mid zone direct entries
+        if action and CORE_MIN_MOVE <= abs_move < EXTREME_BLOCK_MOVE:
+            if smart_stack_allowed(slug, action, move, yes, no):
+                handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "SMART_STACK")
+                time.sleep(CHECK_SECONDS)
+                continue
+
+            # allow first entry even if no profitable parent exists yet
+            if can_take_more_entries(slug, action):
+                existing_key = get_entry_count_key(slug, action)
+                if hour_entry_counts.get(existing_key, 0) == 0:
+                    handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "CORE")
+                    time.sleep(CHECK_SECONDS)
+                    continue
+
             time.sleep(CHECK_SECONDS)
             continue
 
-        # MID ZONE: 60 to 100
-        # Still allow, but same core logic and stack limits
-        if CORE_MAX_MOVE < abs_move < EXTREME_BLOCK_MOVE and action:
-            handle_core_entry(slug, action, edge, move, btc, yes, no, now_ts)
-            time.sleep(CHECK_SECONDS)
-            continue
-
-        # EXTREME ZONE: 100+
-        # No direct entries. Pullback only.
-        if abs_move >= EXTREME_BLOCK_MOVE and action:
+        # Extreme zone: pullback only
+        if action and abs_move >= EXTREME_BLOCK_MOVE:
             if pullback_retrace_met(slug, action, btc):
-                handle_pullback_entry(slug, action, edge, move, btc, yes, no, now_ts)
+                if smart_stack_allowed(slug, action, move, yes, no):
+                    handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK_STACK")
+                    time.sleep(CHECK_SECONDS)
+                    continue
+
+                existing_key = get_entry_count_key(slug, action)
+                if hour_entry_counts.get(existing_key, 0) == 0:
+                    handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK")
+                    time.sleep(CHECK_SECONDS)
+                    continue
 
             time.sleep(CHECK_SECONDS)
             continue
