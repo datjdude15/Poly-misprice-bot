@@ -59,10 +59,26 @@ SIM_MODE = True
 SIM_TIME_STOP_MED = 15 * 60
 SIM_TIME_STOP_LARGE = 20 * 60
 
-# $1k bankroll scaling guidance
-BANKROLL_MODE = "1000"
-MAX_OPEN_EXPOSURE_TEXT = "$40 total open"
-MAX_DAILY_LOSS_TEXT = "-$40 stop for day"
+# =========================
+# BANKROLL / KELLY / EXPOSURE
+# =========================
+BANKROLL = 1000.0
+KELLY_FRACTION = 0.25  # quarter Kelly
+
+MAX_TOTAL_EXPOSURE_PCT = 0.15
+MAX_TOTAL_EXPOSURE_DOLLARS = round(BANKROLL * MAX_TOTAL_EXPOSURE_PCT, 2)
+MAX_CONCURRENT_ACTIVE_TRADES = 3
+
+# Soft floor/ceiling by setup tier for $1k bankroll
+MIN_SIZE_SMALL = 10.0
+MIN_SIZE_MED = 20.0
+MIN_SIZE_LARGE = 30.0
+
+MAX_SIZE_CORE_MED = 40.0
+MAX_SIZE_CORE_LARGE = 60.0
+MAX_SIZE_PULLBACK_MED = 45.0
+MAX_SIZE_PULLBACK_LARGE = 60.0
+MAX_SIZE_STACK = 25.0
 
 ET = ZoneInfo("America/New_York")
 
@@ -182,32 +198,6 @@ def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
     return None, 0.0, move
 
 
-def recommended_cash_size(tier: str, setup_type: str) -> str:
-    if BANKROLL_MODE != "1000":
-        return "N/A"
-
-    if setup_type in ("EXTREME_PULLBACK", "EXTREME_PULLBACK_STACK"):
-        if tier == "LARGE":
-            return "$20"
-        if tier == "MEDIUM":
-            return "$15"
-        return "$10"
-
-    if setup_type in ("SMART_STACK",):
-        if tier == "LARGE":
-            return "$7-$10"
-        if tier == "MEDIUM":
-            return "$5"
-        return "$5"
-
-    # CORE
-    if tier == "LARGE":
-        return "$15"
-    if tier == "MEDIUM":
-        return "$10"
-    return "$5"
-
-
 def build_trade_plan(edge: float, action: str, yes: float, no: float, setup_type: str):
     edge_cents = edge * 100
 
@@ -246,6 +236,7 @@ def build_trade_plan(edge: float, action: str, yes: float, no: float, setup_type
     entry_min = round(base_price, 3)
     entry_max = round(base_price + entry_slip, 3)
     entry_mid = round((entry_min + entry_max) / 2, 3)
+
     cash_size = recommended_cash_size(tier, setup_type)
 
     return {
@@ -302,6 +293,105 @@ def increment_stack_count(slug: str, action: str):
 
 def entry_in_chop_zone(entry_mid: float) -> bool:
     return CHOP_ZONE_MIN <= entry_mid <= CHOP_ZONE_MAX
+
+
+# =========================
+# KELLY / SIZING / EXPOSURE
+# =========================
+def kelly_fraction(p: float, b: float) -> float:
+    q = 1.0 - p
+    f = ((b * p) - q) / b
+    return max(0.0, f)
+
+
+def setup_prob_and_b(tier: str, setup_type: str):
+    # Conservative assumptions from your current sample
+    if setup_type == "CORE":
+        if tier == "LARGE":
+            return 0.62, 2.0
+        if tier == "MEDIUM":
+            return 0.58, 1.67
+        return 0.54, 1.40
+
+    if setup_type == "EXTREME_PULLBACK":
+        if tier == "LARGE":
+            return 0.65, 2.1
+        if tier == "MEDIUM":
+            return 0.61, 1.8
+        return 0.56, 1.45
+
+    if setup_type == "SMART_STACK":
+        if tier == "LARGE":
+            return 0.58, 1.6
+        if tier == "MEDIUM":
+            return 0.55, 1.45
+        return 0.52, 1.25
+
+    if setup_type == "EXTREME_PULLBACK_STACK":
+        if tier == "LARGE":
+            return 0.60, 1.7
+        if tier == "MEDIUM":
+            return 0.56, 1.5
+        return 0.53, 1.25
+
+    return 0.55, 1.5
+
+
+def current_open_exposure() -> float:
+    return round(sum(t["cash_size"] for t in sim_trades if t["active"]), 2)
+
+
+def active_trade_count() -> int:
+    return sum(1 for t in sim_trades if t["active"])
+
+
+def correlation_blocked(slug: str, action: str, setup_type: str) -> bool:
+    # Allow CORE -> SMART_STACK and EXTREME_PULLBACK -> EXTREME_PULLBACK_STACK
+    # Block duplicate same-type active trades on same slug/action
+    for trade in sim_trades:
+        if not trade["active"]:
+            continue
+        if trade["slug"] != slug:
+            continue
+        if trade["action"] != action:
+            continue
+        if trade["setup_type"] == setup_type:
+            return True
+    return False
+
+
+def recommended_cash_size(tier: str, setup_type: str) -> float:
+    p, b = setup_prob_and_b(tier, setup_type)
+    full_kelly = kelly_fraction(p, b)
+    frac = full_kelly * KELLY_FRACTION
+    raw_size = BANKROLL * frac
+
+    if tier == "SMALL":
+        size = max(MIN_SIZE_SMALL, raw_size)
+    elif tier == "MEDIUM":
+        size = max(MIN_SIZE_MED, raw_size)
+    else:
+        size = max(MIN_SIZE_LARGE, raw_size)
+
+    if setup_type == "CORE":
+        cap = MAX_SIZE_CORE_LARGE if tier == "LARGE" else MAX_SIZE_CORE_MED
+    elif setup_type == "EXTREME_PULLBACK":
+        cap = MAX_SIZE_PULLBACK_LARGE if tier == "LARGE" else MAX_SIZE_PULLBACK_MED
+    else:
+        cap = MAX_SIZE_STACK
+
+    size = min(size, cap)
+
+    # Round to nearest whole dollar for cleaner live guidance
+    return float(int(round(size)))
+
+
+def can_fit_exposure(cash_size: float) -> bool:
+    if active_trade_count() >= MAX_CONCURRENT_ACTIVE_TRADES:
+        return False
+    if current_open_exposure() + cash_size > MAX_TOTAL_EXPOSURE_DOLLARS:
+        return False
+    return True
 
 
 # =========================
@@ -502,6 +592,7 @@ def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, 
         "action": action,
         "entry": entry_price,
         "tier": plan["tier"],
+        "cash_size": plan["cash_size"],
         "tp": plan["sim_tp"],
         "sl": plan["sim_sl"],
         "time_stop": plan["sim_time_stop"],
@@ -521,10 +612,11 @@ def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, 
         f"Setup: {setup_type}\n"
         f"Entry: {entry_price}\n"
         f"Tier: {plan['tier']}\n"
-        f"Cash Size ({BANKROLL_MODE}): {plan['cash_size']}\n"
+        f"Cash Size: ${plan['cash_size']:.0f}\n"
         f"TP Target: +{plan['sim_tp']:.3f}\n"
         f"SL Target: -{plan['sim_sl']:.3f}\n"
-        f"Time Stop: {int(plan['sim_time_stop'] / 60)} min"
+        f"Time Stop: {int(plan['sim_time_stop'] / 60)} min\n"
+        f"Open Exposure After Fill: ${current_open_exposure():.0f} / ${MAX_TOTAL_EXPOSURE_DOLLARS:.0f}"
     )
 
 
@@ -552,6 +644,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
                 f"Entry: {trade['entry']}\n"
                 f"Exit: {price_now}\n"
                 f"PnL: {pnl:.3f}\n"
+                f"Cash Size: ${trade['cash_size']:.0f}\n"
                 f"Max Favorable: {trade['max_fav']:.3f}\n"
                 f"Max Adverse: {trade['max_adv']:.3f}"
             )
@@ -567,6 +660,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
                 f"Entry: {trade['entry']}\n"
                 f"Exit: {price_now}\n"
                 f"PnL: {pnl:.3f}\n"
+                f"Cash Size: ${trade['cash_size']:.0f}\n"
                 f"Max Favorable: {trade['max_fav']:.3f}\n"
                 f"Max Adverse: {trade['max_adv']:.3f}"
             )
@@ -582,6 +676,7 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
                 f"Entry: {trade['entry']}\n"
                 f"Exit: {price_now}\n"
                 f"PnL: {pnl:.3f}\n"
+                f"Cash Size: ${trade['cash_size']:.0f}\n"
                 f"Max Favorable: {trade['max_fav']:.3f}\n"
                 f"Max Adverse: {trade['max_adv']:.3f}"
             )
@@ -599,6 +694,9 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
     if not can_take_more_entries(slug, action):
         return
 
+    if correlation_blocked(slug, action, setup_type):
+        return
+
     plan = build_trade_plan(edge, action, yes, no, setup_type)
 
     if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
@@ -609,6 +707,9 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
 
     edge_cents = edge * 100
     if edge_cents < MIN_EDGE_CENTS:
+        return
+
+    if not can_fit_exposure(plan["cash_size"]):
         return
 
     price_now = current_side_price(action, yes, no)
@@ -631,11 +732,12 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
         f"ENTRY MID: {plan['entry_mid']}\n"
         f"ENTRY MAX: {plan['entry_max']}\n\n"
         f"{plan['tier']} | {plan['unit']}\n"
-        f"Cash Size ({BANKROLL_MODE}): {plan['cash_size']}\n"
+        f"Kelly Size: ${plan['cash_size']:.0f}\n"
         f"TP: {plan['tp_text']}\n"
         f"SL: {plan['sl_text']}\n"
         f"TIME: {plan['time_text']}\n"
-        f"Risk Guardrail: {MAX_OPEN_EXPOSURE_TEXT}, {MAX_DAILY_LOSS_TEXT}\n\n"
+        f"Exposure Cap: ${MAX_TOTAL_EXPOSURE_DOLLARS:.0f}\n"
+        f"Concurrent Cap: {MAX_CONCURRENT_ACTIVE_TRADES}\n\n"
         f"{link}"
     )
 
