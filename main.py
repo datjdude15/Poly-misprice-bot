@@ -37,7 +37,7 @@ PULLBACK_EXPIRY_SECONDS = 12 * 60
 MAX_ENTRIES_PER_SIDE_PER_HOUR = 2
 BLOCK_SMALL_TRADES = True
 
-# Smart stacking v2.3
+# Smart stacking
 SMART_STACKING_ENABLED = True
 SMART_STACK_PROFIT_TRIGGER = 0.07
 SMART_STACK_MIN_MOVE = 60.0
@@ -45,9 +45,10 @@ SMART_STACK_MAX_MOVE = 100.0
 SMART_STACK_MIN_EDGE_CENTS = 35.0
 SMART_STACK_MAX_PER_SIDE_PER_HOUR = 1
 
-# Reversal confirmation
+# Reversal confirmation / knife-catch block
 REVERSAL_REQUIRED = True
 MIN_REVERSAL_SIZE = 5.0
+KNIFE_CATCH_BLOCK_ENABLED = True
 
 # Momentum continuation block
 STACK_BLOCK_IF_MOMENTUM = True
@@ -57,6 +58,11 @@ MOMENTUM_CONTINUATION_BLOCK = True
 SIM_MODE = True
 SIM_TIME_STOP_MED = 15 * 60
 SIM_TIME_STOP_LARGE = 20 * 60
+
+# $1k bankroll scaling guidance
+BANKROLL_MODE = "1000"
+MAX_OPEN_EXPOSURE_TEXT = "$40 total open"
+MAX_DAILY_LOSS_TEXT = "-$40 stop for day"
 
 ET = ZoneInfo("America/New_York")
 
@@ -176,7 +182,33 @@ def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
     return None, 0.0, move
 
 
-def build_trade_plan(edge: float, action: str, yes: float, no: float):
+def recommended_cash_size(tier: str, setup_type: str) -> str:
+    if BANKROLL_MODE != "1000":
+        return "N/A"
+
+    if setup_type in ("EXTREME_PULLBACK", "EXTREME_PULLBACK_STACK"):
+        if tier == "LARGE":
+            return "$20"
+        if tier == "MEDIUM":
+            return "$15"
+        return "$10"
+
+    if setup_type in ("SMART_STACK",):
+        if tier == "LARGE":
+            return "$7-$10"
+        if tier == "MEDIUM":
+            return "$5"
+        return "$5"
+
+    # CORE
+    if tier == "LARGE":
+        return "$15"
+    if tier == "MEDIUM":
+        return "$10"
+    return "$5"
+
+
+def build_trade_plan(edge: float, action: str, yes: float, no: float, setup_type: str):
     edge_cents = edge * 100
 
     if edge_cents >= 45:
@@ -214,6 +246,7 @@ def build_trade_plan(edge: float, action: str, yes: float, no: float):
     entry_min = round(base_price, 3)
     entry_max = round(base_price + entry_slip, 3)
     entry_mid = round((entry_min + entry_max) / 2, 3)
+    cash_size = recommended_cash_size(tier, setup_type)
 
     return {
         "tier": tier,
@@ -227,6 +260,7 @@ def build_trade_plan(edge: float, action: str, yes: float, no: float):
         "sim_tp": sim_tp,
         "sim_sl": sim_sl,
         "sim_time_stop": sim_time_stop,
+        "cash_size": cash_size,
     }
 
 
@@ -287,18 +321,31 @@ def reversal_confirmed(action: str) -> bool:
     if not REVERSAL_REQUIRED:
         return True
 
-    if len(recent_btcs) < 3:
+    if len(recent_btcs) < 4:
         return False
 
-    b0 = recent_btcs[-3]
-    b1 = recent_btcs[-2]
-    b2 = recent_btcs[-1]
+    b0 = recent_btcs[-4]
+    b1 = recent_btcs[-3]
+    b2 = recent_btcs[-2]
+    b3 = recent_btcs[-1]
 
     if action == "BUY DOWN":
-        return (b2 - min(b0, b1)) >= MIN_REVERSAL_SIZE
+        recent_low = min(b0, b1, b2)
+        bounce_size = b3 - recent_low
+
+        if KNIFE_CATCH_BLOCK_ENABLED and (b3 < b2 < b1):
+            return False
+
+        return bounce_size >= MIN_REVERSAL_SIZE
 
     if action == "BUY UP":
-        return (max(b0, b1) - b2) >= MIN_REVERSAL_SIZE
+        recent_high = max(b0, b1, b2)
+        pullback_size = recent_high - b3
+
+        if KNIFE_CATCH_BLOCK_ENABLED and (b3 > b2 > b1):
+            return False
+
+        return pullback_size >= MIN_REVERSAL_SIZE
 
     return False
 
@@ -474,6 +521,7 @@ def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, 
         f"Setup: {setup_type}\n"
         f"Entry: {entry_price}\n"
         f"Tier: {plan['tier']}\n"
+        f"Cash Size ({BANKROLL_MODE}): {plan['cash_size']}\n"
         f"TP Target: +{plan['sim_tp']:.3f}\n"
         f"SL Target: -{plan['sim_sl']:.3f}\n"
         f"Time Stop: {int(plan['sim_time_stop'] / 60)} min"
@@ -551,7 +599,7 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
     if not can_take_more_entries(slug, action):
         return
 
-    plan = build_trade_plan(edge, action, yes, no)
+    plan = build_trade_plan(edge, action, yes, no, setup_type)
 
     if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
         return
@@ -583,9 +631,11 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
         f"ENTRY MID: {plan['entry_mid']}\n"
         f"ENTRY MAX: {plan['entry_max']}\n\n"
         f"{plan['tier']} | {plan['unit']}\n"
+        f"Cash Size ({BANKROLL_MODE}): {plan['cash_size']}\n"
         f"TP: {plan['tp_text']}\n"
         f"SL: {plan['sl_text']}\n"
-        f"TIME: {plan['time_text']}\n\n"
+        f"TIME: {plan['time_text']}\n"
+        f"Risk Guardrail: {MAX_OPEN_EXPOSURE_TEXT}, {MAX_DAILY_LOSS_TEXT}\n\n"
         f"{link}"
     )
 
