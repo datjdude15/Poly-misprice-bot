@@ -18,9 +18,14 @@ CONFIRMATION_CHECKS = 2
 
 # Core signal thresholds
 EDGE_THRESHOLD = 0.15
-MIN_MOVE_FOR_ENTRY = 20.0
-CORE_MIN_MOVE = 20.0
+MIN_MOVE_FOR_ENTRY = 30.0
+CORE_MIN_MOVE = 30.0
 CORE_MAX_MOVE = 60.0
+
+# Strong setup filters
+MIN_EDGE_CENTS = 30.0
+CHOP_ZONE_MIN = 0.45
+CHOP_ZONE_MAX = 0.55
 
 # Extreme / pullback logic
 EXTREME_TRIGGER_MOVE = 80.0
@@ -31,13 +36,13 @@ PULLBACK_EXPIRY_SECONDS = 12 * 60
 # Entry / stack controls
 MAX_ENTRIES_PER_SIDE_PER_HOUR = 2
 BLOCK_SMALL_TRADES = True
-SMALL_MOVE_THRESHOLD = 18.0
 
-# Smart stacking v2.2
+# Smart stacking v2.3
 SMART_STACKING_ENABLED = True
 SMART_STACK_PROFIT_TRIGGER = 0.07
-SMART_STACK_MIN_MOVE = 25.0
-SMART_STACK_MAX_MOVE = 60.0
+SMART_STACK_MIN_MOVE = 60.0
+SMART_STACK_MAX_MOVE = 100.0
+SMART_STACK_MIN_EDGE_CENTS = 35.0
 SMART_STACK_MAX_PER_SIDE_PER_HOUR = 1
 
 # Reversal confirmation
@@ -50,10 +55,6 @@ MOMENTUM_CONTINUATION_BLOCK = True
 
 # Simulation settings
 SIM_MODE = True
-SIM_TP_MED = 0.10
-SIM_TP_LARGE = 0.15
-SIM_SL_MED = 0.06
-SIM_SL_LARGE = 0.07
 SIM_TIME_STOP_MED = 15 * 60
 SIM_TIME_STOP_LARGE = 20 * 60
 
@@ -73,17 +74,12 @@ last_alert_time = 0
 sim_trades = []
 sim_trade_counter = 0
 
-# count all entries per side per hour
 hour_entry_counts = {}
-# count only smart-stack adds per side per hour
 hour_stack_counts = {}
-
-# pullback watch
 pullback_watches = {}
 
-# move tracking for reversal / momentum checks
-recent_moves = []   # list of floats, capped small
-recent_btcs = []    # list of floats, capped small
+recent_moves = []
+recent_btcs = []
 
 
 # =========================
@@ -162,8 +158,9 @@ def get_direction_from_move(move: float) -> str:
 
 def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
     move = btc - open_price
+    abs_move = abs(move)
 
-    if abs(move) < MIN_MOVE_FOR_ENTRY:
+    if abs_move < MIN_MOVE_FOR_ENTRY:
         return None, 0.0, move
 
     if move > 0:
@@ -182,7 +179,27 @@ def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
 def build_trade_plan(edge: float, action: str, yes: float, no: float):
     edge_cents = edge * 100
 
-    if edge_cents < 25:
+    if edge_cents >= 45:
+        tier = "LARGE"
+        unit = "1.5u"
+        tp_text = "Scale: +10c / +15-20c"
+        sl_text = "-6 to -8c"
+        time_text = "20-30 min"
+        entry_slip = 0.03
+        sim_tp = 0.15
+        sim_sl = 0.07
+        sim_time_stop = SIM_TIME_STOP_LARGE
+    elif edge_cents >= 35:
+        tier = "MEDIUM"
+        unit = "1u"
+        tp_text = "+8 to +12c"
+        sl_text = "-5 to -7c"
+        time_text = "15-20 min"
+        entry_slip = 0.02
+        sim_tp = 0.10
+        sim_sl = 0.06
+        sim_time_stop = SIM_TIME_STOP_MED
+    else:
         tier = "SMALL"
         unit = "0.5u"
         tp_text = "+6 to +8c"
@@ -192,26 +209,6 @@ def build_trade_plan(edge: float, action: str, yes: float, no: float):
         sim_tp = 0.08
         sim_sl = 0.05
         sim_time_stop = 12 * 60
-    elif edge_cents < 40:
-        tier = "MEDIUM"
-        unit = "1u"
-        tp_text = "+8 to +12c"
-        sl_text = "-5 to -7c"
-        time_text = "15-20 min"
-        entry_slip = 0.02
-        sim_tp = SIM_TP_MED
-        sim_sl = SIM_SL_MED
-        sim_time_stop = SIM_TIME_STOP_MED
-    else:
-        tier = "LARGE"
-        unit = "1.5u"
-        tp_text = "Scale: +10c / +15-20c"
-        sl_text = "-6 to -8c"
-        time_text = "20-30 min"
-        entry_slip = 0.03
-        sim_tp = SIM_TP_LARGE
-        sim_sl = SIM_SL_LARGE
-        sim_time_stop = SIM_TIME_STOP_LARGE
 
     base_price = yes if action == "BUY UP" else no
     entry_min = round(base_price, 3)
@@ -269,6 +266,10 @@ def increment_stack_count(slug: str, action: str):
     hour_stack_counts[key] = hour_stack_counts.get(key, 0) + 1
 
 
+def entry_in_chop_zone(entry_mid: float) -> bool:
+    return CHOP_ZONE_MIN <= entry_mid <= CHOP_ZONE_MAX
+
+
 # =========================
 # MOVE HISTORY / CONFIRMATION
 # =========================
@@ -294,11 +295,9 @@ def reversal_confirmed(action: str) -> bool:
     b2 = recent_btcs[-1]
 
     if action == "BUY DOWN":
-        # Need small bounce upward off the low before fade
         return (b2 - min(b0, b1)) >= MIN_REVERSAL_SIZE
 
     if action == "BUY UP":
-        # Need small pullback downward off the high before fade
         return (max(b0, b1) - b2) >= MIN_REVERSAL_SIZE
 
     return False
@@ -316,11 +315,9 @@ def momentum_still_extending(action: str) -> bool:
     m2 = recent_moves[-1]
 
     if action == "BUY DOWN":
-        # Move still getting more negative
         return m2 < m1 < m0
 
     if action == "BUY UP":
-        # Move still getting more positive
         return m2 > m1 > m0
 
     return False
@@ -412,16 +409,20 @@ def find_best_active_trade(slug: str, action: str, yes: float, no: float):
     return candidates[0]
 
 
-def smart_stack_allowed(slug: str, action: str, move: float, yes: float, no: float) -> bool:
+def smart_stack_allowed(slug: str, action: str, move: float, edge: float, yes: float, no: float) -> bool:
     if not SMART_STACKING_ENABLED:
         return False
 
     abs_move = abs(move)
+    edge_cents = edge * 100
 
     if abs_move < SMART_STACK_MIN_MOVE:
         return False
 
     if abs_move > SMART_STACK_MAX_MOVE:
+        return False
+
+    if edge_cents < SMART_STACK_MIN_EDGE_CENTS:
         return False
 
     if not can_take_more_stacks(slug, action):
@@ -555,6 +556,13 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
     if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
         return
 
+    if entry_in_chop_zone(plan["entry_mid"]):
+        return
+
+    edge_cents = edge * 100
+    if edge_cents < MIN_EDGE_CENTS:
+        return
+
     price_now = current_side_price(action, yes, no)
     entry_quality = get_entry_quality(price_now, plan["entry_min"], plan["entry_mid"], plan["entry_max"])
     link = f"https://polymarket.com/event/{slug}"
@@ -568,7 +576,7 @@ def handle_entry(slug: str, action: str, edge: float, move: float, btc: float, y
         f"Move: {move:.2f}\n"
         f"YES: {yes}\n"
         f"NO: {no}\n"
-        f"Edge: {edge*100:.1f}c\n\n"
+        f"Edge: {edge_cents:.1f}c\n\n"
         f"ENTRY QUALITY\n"
         f"{entry_quality}\n\n"
         f"ENTRY MIN: {plan['entry_min']}\n"
@@ -670,8 +678,13 @@ while True:
             continue
 
         abs_move = abs(move)
+        edge_cents = edge * 100
 
         if abs_move < SMALL_MOVE_THRESHOLD:
+            time.sleep(CHECK_SECONDS)
+            continue
+
+        if edge_cents < MIN_EDGE_CENTS:
             time.sleep(CHECK_SECONDS)
             continue
 
@@ -684,7 +697,7 @@ while True:
                 time.sleep(CHECK_SECONDS)
                 continue
 
-            if smart_stack_allowed(slug, action, move, yes, no):
+            if smart_stack_allowed(slug, action, move, edge, yes, no):
                 handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "SMART_STACK")
                 time.sleep(CHECK_SECONDS)
                 continue
@@ -706,7 +719,7 @@ while True:
                     time.sleep(CHECK_SECONDS)
                     continue
 
-                if smart_stack_allowed(slug, action, move, yes, no):
+                if smart_stack_allowed(slug, action, move, edge, yes, no):
                     handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK_STACK")
                     time.sleep(CHECK_SECONDS)
                     continue
