@@ -62,19 +62,15 @@ SIM_TIME_STOP_LARGE = 20 * 60
 # =========================
 # LIVE AUTO-SCALING
 # =========================
-LIVE_MODE = False  # leave False until you actually go live
+LIVE_MODE = False
 STARTING_BANKROLL = 1000.0
-KELLY_FRACTION = 0.25  # quarter Kelly
+KELLY_FRACTION = 0.25
 AUTO_SCALE_ENABLED = True
+SCALE_STEP_PCT = 0.15
 
-# Only resize after meaningful growth/shrink instead of every tiny change
-SCALE_STEP_PCT = 0.15  # 15%
-
-# Exposure rules scale with bankroll
 MAX_TOTAL_EXPOSURE_PCT = 0.15
 MAX_CONCURRENT_ACTIVE_TRADES = 3
 
-# Soft floors / ceilings
 MIN_SIZE_SMALL = 10.0
 MIN_SIZE_MED = 20.0
 MIN_SIZE_LARGE = 30.0
@@ -84,6 +80,15 @@ MAX_SIZE_CORE_LARGE = 60.0
 MAX_SIZE_PULLBACK_MED = 45.0
 MAX_SIZE_PULLBACK_LARGE = 60.0
 MAX_SIZE_STACK = 25.0
+
+# =========================
+# SHADOW LOGGING
+# =========================
+SHADOW_MODE = True
+SHADOW_LOG_FILE = "shadow_log.jsonl"
+SHADOW_NOTIFY_RESULTS = True
+SHADOW_NOTIFY_BLOCKED_CREATED = False  # set True if you want Telegram alerts for every blocked setup
+MAX_SHADOW_TRACKED_PER_HOUR_SIDE = 3   # avoids huge spam / duplicate blocked shadows
 
 ET = ZoneInfo("America/New_York")
 
@@ -101,14 +106,17 @@ last_alert_time = 0
 sim_trades = []
 sim_trade_counter = 0
 
+shadow_trades = []
+shadow_trade_counter = 0
+
 hour_entry_counts = {}
 hour_stack_counts = {}
 pullback_watches = {}
+hour_shadow_counts = {}
 
 recent_moves = []
 recent_btcs = []
 
-# live bankroll tracking for future rollout
 live_bankroll = STARTING_BANKROLL
 scale_anchor_bankroll = STARTING_BANKROLL
 
@@ -119,6 +127,18 @@ scale_anchor_bankroll = STARTING_BANKROLL
 def send_alert(message: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=15)
+
+
+def write_jsonl(path: str, obj: dict):
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print("LOG_WRITE_ERROR:", e)
+
+
+def now_iso() -> str:
+    return datetime.now(ET).isoformat()
 
 
 def get_btc_price() -> float:
@@ -211,8 +231,6 @@ def evaluate_signal(btc: float, open_price: float, yes: float, no: float):
 # LIVE BANKROLL / AUTO SCALING
 # =========================
 def get_active_bankroll_for_sizing() -> float:
-    # For now, use the tracked live bankroll only when LIVE_MODE is enabled.
-    # Otherwise sizing stays based on your starting bankroll while sim testing.
     if LIVE_MODE:
         return live_bankroll
     return STARTING_BANKROLL
@@ -444,6 +462,20 @@ def increment_stack_count(slug: str, action: str):
     hour_stack_counts[key] = hour_stack_counts.get(key, 0) + 1
 
 
+def get_shadow_count_key(slug: str, action: str):
+    return f"{slug}|{action}|shadow"
+
+
+def can_track_more_shadow(slug: str, action: str) -> bool:
+    key = get_shadow_count_key(slug, action)
+    return hour_shadow_counts.get(key, 0) < MAX_SHADOW_TRACKED_PER_HOUR_SIDE
+
+
+def increment_shadow_count(slug: str, action: str):
+    key = get_shadow_count_key(slug, action)
+    hour_shadow_counts[key] = hour_shadow_counts.get(key, 0) + 1
+
+
 def entry_in_chop_zone(entry_mid: float) -> bool:
     return CHOP_ZONE_MIN <= entry_mid <= CHOP_ZONE_MAX
 
@@ -633,6 +665,126 @@ def smart_stack_allowed(slug: str, action: str, move: float, edge: float, yes: f
 
 
 # =========================
+# SHADOW LOGGING
+# =========================
+def create_shadow_signal(slug: str, action: str, edge: float, move: float, btc: float, yes: float, no: float,
+                         setup_type: str, plan: dict, block_reason: str, now_ts: float):
+    global shadow_trade_counter
+
+    if not SHADOW_MODE:
+        return
+
+    if not can_track_more_shadow(slug, action):
+        return
+
+    shadow_trade_counter += 1
+    signal_id = shadow_trade_counter
+
+    shadow = {
+        "id": signal_id,
+        "kind": "shadow_blocked_signal",
+        "created_at": now_iso(),
+        "created_ts": now_ts,
+        "slug": slug,
+        "action": action,
+        "setup_type": setup_type,
+        "btc": btc,
+        "hour_open": hour_open_price,
+        "move": move,
+        "yes": yes,
+        "no": no,
+        "edge_cents": round(edge * 100, 1),
+        "tier": plan["tier"],
+        "entry_min": plan["entry_min"],
+        "entry_mid": plan["entry_mid"],
+        "entry_max": plan["entry_max"],
+        "tp": plan["sim_tp"],
+        "sl": plan["sim_sl"],
+        "time_stop": plan["sim_time_stop"],
+        "cash_size": plan["cash_size"],
+        "block_reason": block_reason,
+        "active": True,
+        "max_fav": 0.0,
+        "max_adv": 0.0,
+    }
+
+    shadow_trades.append(shadow)
+    increment_shadow_count(slug, action)
+
+    write_jsonl(SHADOW_LOG_FILE, shadow)
+
+    if SHADOW_NOTIFY_BLOCKED_CREATED:
+        send_alert(
+            f"SHADOW BLOCKED #{signal_id}\n"
+            f"{action}\n"
+            f"Setup: {setup_type}\n"
+            f"Reason: {block_reason}\n"
+            f"Entry Mid: {plan['entry_mid']}\n"
+            f"Edge: {edge * 100:.1f}c\n"
+            f"Move: {move:.2f}"
+        )
+
+
+def update_shadow_trades(yes: float, no: float, now_ts: float):
+    global shadow_trades
+
+    for trade in shadow_trades:
+        if not trade["active"]:
+            continue
+
+        price_now = yes if trade["action"] == "BUY UP" else no
+        pnl = round(price_now - trade["entry_mid"], 3)
+
+        if pnl > trade["max_fav"]:
+            trade["max_fav"] = pnl
+        if pnl < trade["max_adv"]:
+            trade["max_adv"] = pnl
+
+        outcome = None
+        if pnl >= trade["tp"]:
+            outcome = "TP HIT"
+        elif pnl <= -trade["sl"]:
+            outcome = "SL HIT"
+        elif now_ts - trade["created_ts"] >= trade["time_stop"]:
+            outcome = "TIME EXIT"
+
+        if outcome is not None:
+            trade["active"] = False
+            result = {
+                "id": trade["id"],
+                "kind": "shadow_blocked_result",
+                "resolved_at": now_iso(),
+                "slug": trade["slug"],
+                "action": trade["action"],
+                "setup_type": trade["setup_type"],
+                "block_reason": trade["block_reason"],
+                "entry": trade["entry_mid"],
+                "exit": price_now,
+                "pnl": pnl,
+                "outcome": outcome,
+                "max_favorable": round(trade["max_fav"], 3),
+                "max_adverse": round(trade["max_adv"], 3),
+            }
+            write_jsonl(SHADOW_LOG_FILE, result)
+
+            if SHADOW_NOTIFY_RESULTS:
+                send_alert(
+                    f"SHADOW RESULT #{trade['id']}\n"
+                    f"{outcome}\n"
+                    f"Action: {trade['action']}\n"
+                    f"Setup: {trade['setup_type']}\n"
+                    f"Blocked By: {trade['block_reason']}\n"
+                    f"Entry: {trade['entry_mid']}\n"
+                    f"Exit: {price_now}\n"
+                    f"PnL: {pnl:.3f}\n"
+                    f"Max Favorable: {trade['max_fav']:.3f}\n"
+                    f"Max Adverse: {trade['max_adv']:.3f}"
+                )
+
+    shadow_trades = [t for t in shadow_trades if t["active"]]
+
+
+# =========================
 # SIMULATION
 # =========================
 def start_sim_trade(action: str, entry_price: float, plan: dict, now_ts: float, slug: str, setup_type: str):
@@ -689,7 +841,6 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
         if pnl < trade["max_adv"]:
             trade["max_adv"] = pnl
 
-        # approximate realized $ PnL for live mode only
         pnl_dollars = pnl * trade["cash_size"]
 
         if pnl >= trade["tp"]:
@@ -746,6 +897,43 @@ def update_sim_trades(yes: float, no: float, now_ts: float):
             trade["active"] = False
 
     sim_trades = [t for t in sim_trades if t["active"]]
+
+
+# =========================
+# DECISION HELPERS
+# =========================
+def assess_block_reason(slug: str, action: str, edge: float, move: float, yes: float, no: float,
+                        setup_type: str, plan: dict, confirmed: bool, now_ts: float, now_dt: datetime):
+    edge_cents = edge * 100
+
+    if not confirmed:
+        return "FAILED_CONFIRMATION"
+
+    if now_ts - last_alert_time < COOLDOWN_SECONDS:
+        return "FAILED_COOLDOWN"
+
+    if edge_cents < MIN_EDGE_CENTS:
+        return "FAILED_MIN_EDGE"
+
+    if BLOCK_SMALL_TRADES and plan["tier"] == "SMALL":
+        return "FAILED_SMALL_TRADE_BLOCK"
+
+    if entry_in_chop_zone(plan["entry_mid"]):
+        return "FAILED_CHOP_ZONE"
+
+    if not can_take_more_entries(slug, action):
+        return "FAILED_ENTRY_LIMIT"
+
+    if correlation_blocked(slug, action, setup_type):
+        return "FAILED_CORRELATION"
+
+    if not can_fit_exposure(plan["cash_size"]):
+        return "FAILED_EXPOSURE_CAP"
+
+    if in_no_trade_window(now_dt):
+        return "FAILED_NO_TRADE_WINDOW"
+
+    return None
 
 
 # =========================
@@ -854,6 +1042,7 @@ while True:
 
             hour_entry_counts = {}
             hour_stack_counts = {}
+            hour_shadow_counts = {}
             pullback_watches = {}
             recent_moves = []
             recent_btcs = []
@@ -866,13 +1055,8 @@ while True:
 
         update_recent_state(move, btc)
         update_sim_trades(yes, no, now_ts)
+        update_shadow_trades(yes, no, now_ts)
         expire_old_pullback_watches(now_ts)
-
-        if in_no_trade_window(now):
-            pending_action = None
-            pending_count = 0
-            time.sleep(CHECK_SECONDS)
-            continue
 
         if action:
             if action == pending_action:
@@ -886,6 +1070,84 @@ while True:
 
         confirmed = pending_count >= CONFIRMATION_CHECKS
 
+        if not action:
+            time.sleep(CHECK_SECONDS)
+            continue
+
+        abs_move = abs(move)
+        edge_cents = edge * 100
+
+        if abs_move >= EXTREME_TRIGGER_MOVE:
+            update_pullback_watch(slug, action, move, btc, now_ts)
+
+        # Decide likely setup bucket for shadow tracking / actual handling
+        setup_candidate = None
+
+        if CORE_MIN_MOVE <= abs_move < EXTREME_BLOCK_MOVE:
+            setup_candidate = "CORE"
+        elif abs_move >= EXTREME_BLOCK_MOVE and pullback_retrace_met(slug, action, btc):
+            setup_candidate = "EXTREME_PULLBACK"
+
+        if setup_candidate is None:
+            time.sleep(CHECK_SECONDS)
+            continue
+
+        plan = build_trade_plan(edge, action, yes, no, setup_candidate)
+
+        # Shadow logging for setups that got close but were blocked
+        if SHADOW_MODE:
+            block_reason = assess_block_reason(
+                slug=slug,
+                action=action,
+                edge=edge,
+                move=move,
+                yes=yes,
+                no=no,
+                setup_type=setup_candidate,
+                plan=plan,
+                confirmed=confirmed,
+                now_ts=now_ts,
+                now_dt=now
+            )
+
+            # Extra setup-specific filters
+            if block_reason is None and setup_candidate == "CORE":
+                if not reversal_confirmed(action):
+                    block_reason = "FAILED_REVERSAL_CONFIRMATION"
+                elif smart_stack_allowed(slug, action, move, edge, yes, no):
+                    # It may stack or core. We only shadow if the actual entry doesn't happen.
+                    pass
+
+            if block_reason is None and setup_candidate == "EXTREME_PULLBACK":
+                if not reversal_confirmed(action):
+                    block_reason = "FAILED_REVERSAL_CONFIRMATION"
+
+            # If core is over extreme trigger and momentum still extending, note it
+            if block_reason is None and setup_candidate in ("CORE", "EXTREME_PULLBACK"):
+                if setup_candidate != "CORE" and not pullback_retrace_met(slug, action, btc):
+                    block_reason = "FAILED_PULLBACK_RETRACE"
+
+            # Create shadow only for true blocked opportunities
+            if block_reason is not None:
+                create_shadow_signal(
+                    slug=slug,
+                    action=action,
+                    edge=edge,
+                    move=move,
+                    btc=btc,
+                    yes=yes,
+                    no=no,
+                    setup_type=setup_candidate,
+                    plan=plan,
+                    block_reason=block_reason,
+                    now_ts=now_ts
+                )
+
+        # Actual live/sim entry logic
+        if in_no_trade_window(now):
+            time.sleep(CHECK_SECONDS)
+            continue
+
         if not confirmed:
             time.sleep(CHECK_SECONDS)
             continue
@@ -894,18 +1156,12 @@ while True:
             time.sleep(CHECK_SECONDS)
             continue
 
-        abs_move = abs(move)
-        edge_cents = edge * 100
-
         if edge_cents < MIN_EDGE_CENTS:
             time.sleep(CHECK_SECONDS)
             continue
 
-        if abs_move >= EXTREME_TRIGGER_MOVE and action:
-            update_pullback_watch(slug, action, move, btc, now_ts)
-
         # CORE / MID RANGE
-        if action and CORE_MIN_MOVE <= abs_move < EXTREME_BLOCK_MOVE:
+        if setup_candidate == "CORE":
             if not reversal_confirmed(action):
                 time.sleep(CHECK_SECONDS)
                 continue
@@ -926,25 +1182,21 @@ while True:
             continue
 
         # EXTREME RANGE = PULLBACK ONLY
-        if action and abs_move >= EXTREME_BLOCK_MOVE:
-            if pullback_retrace_met(slug, action, btc):
-                if not reversal_confirmed(action):
-                    time.sleep(CHECK_SECONDS)
-                    continue
+        if setup_candidate == "EXTREME_PULLBACK":
+            if not reversal_confirmed(action):
+                time.sleep(CHECK_SECONDS)
+                continue
 
-                if smart_stack_allowed(slug, action, move, edge, yes, no):
-                    handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK_STACK")
-                    time.sleep(CHECK_SECONDS)
-                    continue
+            if smart_stack_allowed(slug, action, move, edge, yes, no):
+                handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK_STACK")
+                time.sleep(CHECK_SECONDS)
+                continue
 
-                key = get_entry_count_key(slug, action)
-                if hour_entry_counts.get(key, 0) == 0:
-                    handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK")
-                    time.sleep(CHECK_SECONDS)
-                    continue
-
-            time.sleep(CHECK_SECONDS)
-            continue
+            key = get_entry_count_key(slug, action)
+            if hour_entry_counts.get(key, 0) == 0:
+                handle_entry(slug, action, edge, move, btc, yes, no, now_ts, "EXTREME_PULLBACK")
+                time.sleep(CHECK_SECONDS)
+                continue
 
         time.sleep(CHECK_SECONDS)
 
