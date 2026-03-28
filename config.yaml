@@ -29,13 +29,16 @@ app:
   dashboard_title: PolySniper Live Dashboard
 
 market:
-  slug: bitcoin-up-or-down-march-28-2026-5pm-et
-  yes_token_id: "62150079403357766473223662889708043286348847718895175090452416758130123022351"
-  no_token_id: "81374399187973499733840120584660488689606035507264701365223700065599349661821"
+  auto_switch_hourly: true
+  timezone: "US/Central"
+  market_type: "btc_hourly"
   use_public_clob_midpoint: true
   price_source_url: ""
-  hour_open_btc: 66190
-  btc_spot_fallback: 66190
+  slug: ""
+  yes_token_id: ""
+  no_token_id: ""
+  hour_open_btc: 0
+  btc_spot_fallback: 0
 
 strategy:
   min_edge_cents: 35
