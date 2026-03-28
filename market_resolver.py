@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -9,6 +9,10 @@ import requests
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+
+# IMPORTANT:
+# Polymarket BTC hourly market slugs are in ET, not Central.
+MARKET_TIMEZONE = "America/New_York"
 
 
 @dataclass
@@ -23,23 +27,23 @@ class MarketState:
 def _to_12h(hour_24: int) -> tuple[int, str]:
     if hour_24 == 0:
         return 12, "am"
-    if 1 <= hour_24 < 12:
+    if hour_24 < 12:
         return hour_24, "am"
     if hour_24 == 12:
         return 12, "pm"
     return hour_24 - 12, "pm"
 
 
-def build_current_btc_hourly_slug(now_local: datetime) -> str:
-    month = now_local.strftime("%B").lower()
-    day = now_local.day
-    year = now_local.year
-    hour_12, suffix = _to_12h(now_local.hour)
+def build_btc_hourly_slug(dt_et: datetime) -> str:
+    month = dt_et.strftime("%B").lower()
+    day = dt_et.day
+    year = dt_et.year
+    hour_12, suffix = _to_12h(dt_et.hour)
     return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour_12}{suffix}-et"
 
 
-def get_current_market_hour_label(now_local: datetime) -> str:
-    hour_12, suffix = _to_12h(now_local.hour)
+def get_market_hour_label(dt_et: datetime) -> str:
+    hour_12, suffix = _to_12h(dt_et.hour)
     return f"{hour_12}{suffix.upper()} ET"
 
 
@@ -51,14 +55,7 @@ def fetch_coinbase_spot() -> float:
 
 
 def fetch_hour_open_btc() -> float:
-    """
-    Temporary practical fallback:
-    use current Coinbase spot as hour_open proxy so the bot can run
-    without Binance geo issues.
-
-    This is enough to get the bot unstuck and operating.
-    Later, if needed, we can upgrade this to a true candle-open source.
-    """
+    # Temporary practical fallback to keep bot live without Binance.
     return fetch_coinbase_spot()
 
 
@@ -74,8 +71,8 @@ def fetch_all_markets() -> list[dict]:
             timeout=20,
         )
         resp.raise_for_status()
-        batch = resp.json()
 
+        batch = resp.json()
         if not isinstance(batch, list) or not batch:
             break
 
@@ -85,7 +82,6 @@ def fetch_all_markets() -> list[dict]:
             break
 
         offset += limit
-
         if offset >= 1000:
             break
 
@@ -114,24 +110,17 @@ def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
         elif isinstance(raw_outcomes, list):
             outcomes = raw_outcomes
 
-    # Prefer explicit mapping for BTC hourly markets: ["Up","Down"]
     if len(outcomes) >= 2:
         first = str(outcomes[0]).strip().lower()
         second = str(outcomes[1]).strip().lower()
 
-        if first == "up" and second == "down":
+        if first in ("up", "yes") and second in ("down", "no"):
             return str(token_ids[0]), str(token_ids[1])
 
-        if first == "yes" and second == "no":
-            return str(token_ids[0]), str(token_ids[1])
-
-    # Fallback to API order
     return str(token_ids[0]), str(token_ids[1])
 
 
-def get_tokens_from_slug(slug: str) -> tuple[str, str]:
-    markets = fetch_all_markets()
-
+def get_tokens_from_slug(slug: str, markets: list[dict]) -> tuple[str, str]:
     exact_match = None
     partial_match = None
 
@@ -153,21 +142,40 @@ def get_tokens_from_slug(slug: str) -> tuple[str, str]:
 
 
 def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
-    local_tz = ZoneInfo(tz_name)
-    now_local = datetime.now(local_tz)
+    """
+    Build slug using ET because Polymarket hourly BTC markets are labeled in ET.
+    Also tries current ET hour first, then nearby hours as fallback.
+    """
+    now_et = datetime.now(ZoneInfo(MARKET_TIMEZONE))
+    markets = fetch_all_markets()
 
-    slug = build_current_btc_hourly_slug(now_local)
-    yes_token_id, no_token_id = get_tokens_from_slug(slug)
-    hour_open_btc = fetch_hour_open_btc()
-    market_hour_label = get_current_market_hour_label(now_local)
+    candidate_times = [
+        now_et,
+        now_et - timedelta(hours=1),
+        now_et + timedelta(hours=1),
+    ]
 
-    return MarketState(
-        slug=slug,
-        yes_token_id=yes_token_id,
-        no_token_id=no_token_id,
-        hour_open_btc=hour_open_btc,
-        market_hour_label=market_hour_label,
-    )
+    last_error = None
+
+    for candidate_dt in candidate_times:
+        slug = build_btc_hourly_slug(candidate_dt)
+
+        try:
+            yes_token_id, no_token_id = get_tokens_from_slug(slug, markets)
+            hour_open_btc = fetch_hour_open_btc()
+            market_hour_label = get_market_hour_label(candidate_dt)
+
+            return MarketState(
+                slug=slug,
+                yes_token_id=yes_token_id,
+                no_token_id=no_token_id,
+                hour_open_btc=hour_open_btc,
+                market_hour_label=market_hour_label,
+            )
+        except Exception as e:
+            last_error = e
+
+    raise Exception(str(last_error) if last_error else "Unable to resolve market state")
 
 
 def fetch_public_clob_midpoint(token_id: str) -> float | None:
@@ -190,10 +198,14 @@ def fetch_public_clob_midpoint(token_id: str) -> float | None:
         best_ask = None
 
         if bids:
-            best_bid = max(float(x["price"]) for x in bids if "price" in x)
+            bid_prices = [float(x["price"]) for x in bids if "price" in x]
+            if bid_prices:
+                best_bid = max(bid_prices)
 
         if asks:
-            best_ask = min(float(x["price"]) for x in asks if "price" in x)
+            ask_prices = [float(x["price"]) for x in asks if "price" in x]
+            if ask_prices:
+                best_ask = min(ask_prices)
 
         if best_bid is not None and best_ask is not None:
             return round((best_bid + best_ask) / 2, 4)
