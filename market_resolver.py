@@ -10,8 +10,7 @@ GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 
-# IMPORTANT:
-# Polymarket BTC hourly market slugs are in ET, not Central.
+# Polymarket BTC hourly market slugs are labeled in ET.
 MARKET_TIMEZONE = "America/New_York"
 
 
@@ -55,7 +54,10 @@ def fetch_coinbase_spot() -> float:
 
 
 def fetch_hour_open_btc() -> float:
-    # Temporary practical fallback to keep bot live without Binance.
+    """
+    Practical fallback to keep the bot running without Binance.
+    Uses current Coinbase spot as temporary hour-open proxy.
+    """
     return fetch_coinbase_spot()
 
 
@@ -144,9 +146,14 @@ def get_tokens_from_slug(slug: str, markets: list[dict]) -> tuple[str, str]:
 def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
     """
     Build slug using ET because Polymarket hourly BTC markets are labeled in ET.
-    Also tries current ET hour first, then nearby hours as fallback.
+    Critical fix: floor ET time to the current hour so 6:55pm ET resolves
+    the 6pm ET market, not 7pm ET.
     """
     now_et = datetime.now(ZoneInfo(MARKET_TIMEZONE))
+
+    # CRITICAL FIX: floor to the current started hour
+    now_et = now_et.replace(minute=0, second=0, microsecond=0)
+
     markets = fetch_all_markets()
 
     candidate_times = [
