@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 CHECK_SECONDS = 1
 COOLDOWN_SECONDS = 60
 NO_TRADE_MINUTES = 5
-CONFIRMATION_CHECKS = 2
+CONFIRMATION_CHECKS = 1   # v2.5 loosened from 2 -> 1
 
 # Core signal thresholds
 EDGE_THRESHOLD = 0.15
@@ -23,7 +23,7 @@ CORE_MIN_MOVE = 30.0
 CORE_MAX_MOVE = 60.0
 
 # Strong setup filters
-MIN_EDGE_CENTS = 30.0
+MIN_EDGE_CENTS = 27.5     # v2.5 loosened from 30.0 -> 27.5
 CHOP_ZONE_MIN = 0.45
 CHOP_ZONE_MAX = 0.55
 
@@ -47,7 +47,7 @@ SMART_STACK_MAX_PER_SIDE_PER_HOUR = 1
 
 # Reversal confirmation / knife-catch block
 REVERSAL_REQUIRED = True
-MIN_REVERSAL_SIZE = 5.0
+MIN_REVERSAL_SIZE = 2.0   # v2.5 loosened from 5.0 -> 2.0
 KNIFE_CATCH_BLOCK_ENABLED = True
 
 # Momentum continuation block
@@ -87,8 +87,8 @@ MAX_SIZE_STACK = 25.0
 SHADOW_MODE = True
 SHADOW_LOG_FILE = "shadow_log.jsonl"
 SHADOW_NOTIFY_RESULTS = True
-SHADOW_NOTIFY_BLOCKED_CREATED = False  # set True if you want Telegram alerts for every blocked setup
-MAX_SHADOW_TRACKED_PER_HOUR_SIDE = 3   # avoids huge spam / duplicate blocked shadows
+SHADOW_NOTIFY_BLOCKED_CREATED = False
+MAX_SHADOW_TRACKED_PER_HOUR_SIDE = 3
 
 ET = ZoneInfo("America/New_York")
 
@@ -1080,7 +1080,6 @@ while True:
         if abs_move >= EXTREME_TRIGGER_MOVE:
             update_pullback_watch(slug, action, move, btc, now_ts)
 
-        # Decide likely setup bucket for shadow tracking / actual handling
         setup_candidate = None
 
         if CORE_MIN_MOVE <= abs_move < EXTREME_BLOCK_MOVE:
@@ -1094,7 +1093,6 @@ while True:
 
         plan = build_trade_plan(edge, action, yes, no, setup_candidate)
 
-        # Shadow logging for setups that got close but were blocked
         if SHADOW_MODE:
             block_reason = assess_block_reason(
                 slug=slug,
@@ -1110,24 +1108,18 @@ while True:
                 now_dt=now
             )
 
-            # Extra setup-specific filters
             if block_reason is None and setup_candidate == "CORE":
                 if not reversal_confirmed(action):
                     block_reason = "FAILED_REVERSAL_CONFIRMATION"
-                elif smart_stack_allowed(slug, action, move, edge, yes, no):
-                    # It may stack or core. We only shadow if the actual entry doesn't happen.
-                    pass
 
             if block_reason is None and setup_candidate == "EXTREME_PULLBACK":
                 if not reversal_confirmed(action):
                     block_reason = "FAILED_REVERSAL_CONFIRMATION"
 
-            # If core is over extreme trigger and momentum still extending, note it
-            if block_reason is None and setup_candidate in ("CORE", "EXTREME_PULLBACK"):
-                if setup_candidate != "CORE" and not pullback_retrace_met(slug, action, btc):
+            if block_reason is None and setup_candidate != "CORE":
+                if not pullback_retrace_met(slug, action, btc):
                     block_reason = "FAILED_PULLBACK_RETRACE"
 
-            # Create shadow only for true blocked opportunities
             if block_reason is not None:
                 create_shadow_signal(
                     slug=slug,
@@ -1143,7 +1135,6 @@ while True:
                     now_ts=now_ts
                 )
 
-        # Actual live/sim entry logic
         if in_no_trade_window(now):
             time.sleep(CHECK_SECONDS)
             continue
@@ -1160,7 +1151,6 @@ while True:
             time.sleep(CHECK_SECONDS)
             continue
 
-        # CORE / MID RANGE
         if setup_candidate == "CORE":
             if not reversal_confirmed(action):
                 time.sleep(CHECK_SECONDS)
@@ -1181,7 +1171,6 @@ while True:
             time.sleep(CHECK_SECONDS)
             continue
 
-        # EXTREME RANGE = PULLBACK ONLY
         if setup_candidate == "EXTREME_PULLBACK":
             if not reversal_confirmed(action):
                 time.sleep(CHECK_SECONDS)
