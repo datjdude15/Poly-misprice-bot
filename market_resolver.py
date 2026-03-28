@@ -1,7 +1,14 @@
-import requests
-from datetime import datetime
-import pytz
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+import requests
+
+
+GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
+COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 
 
 @dataclass
@@ -10,110 +17,194 @@ class MarketState:
     yes_token_id: str
     no_token_id: str
     hour_open_btc: float
+    market_hour_label: str
 
 
-# -------------------------
-# COINBASE PRICE (NO BLOCK)
-# -------------------------
+def _to_12h(hour_24: int) -> tuple[int, str]:
+    if hour_24 == 0:
+        return 12, "am"
+    if 1 <= hour_24 < 12:
+        return hour_24, "am"
+    if hour_24 == 12:
+        return 12, "pm"
+    return hour_24 - 12, "pm"
 
-def fetch_coinbase_price():
-    r = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=10)
-    r.raise_for_status()
-    return float(r.json()["data"]["amount"])
+
+def build_current_btc_hourly_slug(now_local: datetime) -> str:
+    month = now_local.strftime("%B").lower()
+    day = now_local.day
+    year = now_local.year
+    hour_12, suffix = _to_12h(now_local.hour)
+    return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour_12}{suffix}-et"
 
 
-# -------------------------
-# GET HOUR OPEN (SIMPLIFIED)
-# -------------------------
+def get_current_market_hour_label(now_local: datetime) -> str:
+    hour_12, suffix = _to_12h(now_local.hour)
+    return f"{hour_12}{suffix.upper()} ET"
 
-def get_hour_open_price():
+
+def fetch_coinbase_spot() -> float:
+    resp = requests.get(COINBASE_SPOT_URL, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    return float(data["data"]["amount"])
+
+
+def fetch_hour_open_btc() -> float:
     """
-    We approximate hour open using current price at hour start.
-    Since Coinbase doesn't give historical candles easily without auth,
-    we use a stable fallback:
+    Temporary practical fallback:
+    use current Coinbase spot as hour_open proxy so the bot can run
+    without Binance geo issues.
+
+    This is enough to get the bot unstuck and operating.
+    Later, if needed, we can upgrade this to a true candle-open source.
     """
-    return fetch_coinbase_price()
+    return fetch_coinbase_spot()
 
 
-# -------------------------
-# GET TOKEN IDS FROM GAMMA
-# -------------------------
+def fetch_all_markets() -> list[dict]:
+    markets = []
+    offset = 0
+    limit = 100
 
-def get_tokens_from_slug(slug: str):
-    url = f"https://gamma-api.polymarket.com/events/{slug}"
-    r = requests.get(url, timeout=10)
+    while True:
+        resp = requests.get(
+            GAMMA_MARKETS_URL,
+            params={"limit": limit, "offset": offset},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        batch = resp.json()
 
-    if r.status_code != 200:
-        raise Exception(f"Gamma fetch failed: {r.status_code}")
+        if not isinstance(batch, list) or not batch:
+            break
 
-    data = r.json()
+        markets.extend(batch)
 
-    tokens = data.get("clobTokenIds", [])
-    if len(tokens) < 2:
-        raise Exception("Token IDs not found")
+        if len(batch) < limit:
+            break
 
-    return tokens[0], tokens[1]
+        offset += limit
+
+        if offset >= 1000:
+            break
+
+    return markets
 
 
-# -------------------------
-# MAIN RESOLVER
-# -------------------------
+def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
+    raw_tokens = market.get("clobTokenIds", "")
+    raw_outcomes = market.get("outcomes", "")
 
-def resolve_current_market_state(tz_name="US/Central"):
-    tz = pytz.timezone(tz_name)
-    now = datetime.now(tz)
+    if not raw_tokens:
+        raise ValueError("Missing clobTokenIds")
 
-    hour_12 = now.strftime("%-I")  # 5 instead of 05
-    ampm = now.strftime("%p").lower()
+    if isinstance(raw_tokens, str):
+        token_ids = json.loads(raw_tokens)
+    else:
+        token_ids = raw_tokens
 
-    date_str = now.strftime("%B-%-d-%Y").lower().replace(" ", "-")
+    if len(token_ids) < 2:
+        raise ValueError("Expected at least 2 token IDs")
 
-    slug = f"bitcoin-up-or-down-{date_str}-{hour_12}{ampm}-et"
+    outcomes = []
+    if raw_outcomes:
+        if isinstance(raw_outcomes, str):
+            outcomes = json.loads(raw_outcomes)
+        elif isinstance(raw_outcomes, list):
+            outcomes = raw_outcomes
 
-    try:
-        yes_token, no_token = get_tokens_from_slug(slug)
-    except Exception as e:
-        print(f"[Resolver] Token fetch failed: {e}")
-        yes_token, no_token = "", ""
+    # Prefer explicit mapping for BTC hourly markets: ["Up","Down"]
+    if len(outcomes) >= 2:
+        first = str(outcomes[0]).strip().lower()
+        second = str(outcomes[1]).strip().lower()
 
-    try:
-        hour_open = get_hour_open_price()
-    except Exception as e:
-        print(f"[Resolver] Hour open fetch failed: {e}")
-        hour_open = 0
+        if first == "up" and second == "down":
+            return str(token_ids[0]), str(token_ids[1])
+
+        if first == "yes" and second == "no":
+            return str(token_ids[0]), str(token_ids[1])
+
+    # Fallback to API order
+    return str(token_ids[0]), str(token_ids[1])
+
+
+def get_tokens_from_slug(slug: str) -> tuple[str, str]:
+    markets = fetch_all_markets()
+
+    exact_match = None
+    partial_match = None
+
+    for market in markets:
+        market_slug = str(market.get("slug", "")).strip().lower()
+
+        if market_slug == slug.lower():
+            exact_match = market
+            break
+
+        if slug.lower() in market_slug:
+            partial_match = market
+
+    chosen = exact_match or partial_match
+    if not chosen:
+        raise Exception(f"Market not found for slug: {slug}")
+
+    return _parse_clob_token_ids(chosen)
+
+
+def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
+    local_tz = ZoneInfo(tz_name)
+    now_local = datetime.now(local_tz)
+
+    slug = build_current_btc_hourly_slug(now_local)
+    yes_token_id, no_token_id = get_tokens_from_slug(slug)
+    hour_open_btc = fetch_hour_open_btc()
+    market_hour_label = get_current_market_hour_label(now_local)
 
     return MarketState(
         slug=slug,
-        yes_token_id=yes_token,
-        no_token_id=no_token,
-        hour_open_btc=hour_open
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        hour_open_btc=hour_open_btc,
+        market_hour_label=market_hour_label,
     )
 
 
-# -------------------------
-# PUBLIC CLOB PRICE
-# -------------------------
+def fetch_public_clob_midpoint(token_id: str) -> float | None:
+    if not token_id:
+        return None
 
-def fetch_public_clob_midpoint(token_id: str):
     try:
-        url = f"https://clob.polymarket.com/book?token_id={token_id}"
-        r = requests.get(url, timeout=10)
-
-        if r.status_code != 200:
-            return None
-
-        data = r.json()
+        resp = requests.get(
+            PUBLIC_CLOB_BOOK_URL,
+            params={"token_id": token_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         bids = data.get("bids", [])
         asks = data.get("asks", [])
 
-        if not bids or not asks:
-            return None
+        best_bid = None
+        best_ask = None
 
-        best_bid = float(bids[0]["price"])
-        best_ask = float(asks[0]["price"])
+        if bids:
+            best_bid = max(float(x["price"]) for x in bids if "price" in x)
 
-        return (best_bid + best_ask) / 2
+        if asks:
+            best_ask = min(float(x["price"]) for x in asks if "price" in x)
+
+        if best_bid is not None and best_ask is not None:
+            return round((best_bid + best_ask) / 2, 4)
+
+        if best_bid is not None:
+            return round(best_bid, 4)
+
+        if best_ask is not None:
+            return round(best_ask, 4)
+
+        return None
 
     except Exception:
         return None
