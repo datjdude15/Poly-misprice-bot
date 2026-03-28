@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 
-GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+GAMMA_MARKET_BY_SLUG_URL = "https://gamma-api.polymarket.com/markets/slug/{slug}"
 PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 
@@ -54,40 +54,19 @@ def fetch_coinbase_spot() -> float:
 
 
 def fetch_hour_open_btc() -> float:
-    """
-    Temporary fallback so the bot can run without Binance.
-    """
+    # Stable fallback so the bot can keep running without Binance.
     return fetch_coinbase_spot()
 
 
-def fetch_all_markets() -> list[dict]:
-    markets = []
-    offset = 0
-    limit = 100
+def fetch_market_by_slug(slug: str) -> dict:
+    url = GAMMA_MARKET_BY_SLUG_URL.format(slug=slug)
+    resp = requests.get(url, timeout=20)
 
-    while True:
-        resp = requests.get(
-            GAMMA_MARKETS_URL,
-            params={"limit": limit, "offset": offset},
-            timeout=20,
-        )
-        resp.raise_for_status()
+    if resp.status_code == 404:
+        raise Exception(f"Market not found for slug: {slug}")
 
-        batch = resp.json()
-        if not isinstance(batch, list) or not batch:
-            break
-
-        markets.extend(batch)
-
-        if len(batch) < limit:
-            break
-
-        offset += limit
-
-        if offset >= 2000:
-            break
-
-    return markets
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
@@ -125,27 +104,16 @@ def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
     return str(token_ids[0]), str(token_ids[1])
 
 
-def get_tokens_from_slug(slug: str, markets: list[dict]) -> tuple[str, str]:
-    for market in markets:
-        market_slug = str(market.get("slug", "")).strip().lower()
-        if market_slug == slug.lower():
-            return _parse_clob_token_ids(market)
-
-    raise Exception(f"Market not found for slug: {slug}")
-
-
 def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
     """
     Public function expected by bot.py.
     Uses UTC -> ET conversion to avoid double-offset timezone bugs.
-    Floors to the current ET hour so 6:55pm ET resolves 6pm ET market.
+    Floors to the current ET hour so 7:10pm ET resolves 7pm ET market.
     Tries current hour first, then previous hour as fallback.
     """
     now_utc = datetime.now(UTC)
     now_et = now_utc.astimezone(ET)
     now_et = now_et.replace(minute=0, second=0, microsecond=0)
-
-    markets = fetch_all_markets()
 
     candidate_times = [
         now_et,
@@ -158,7 +126,8 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
         slug = build_btc_hourly_slug(candidate_dt)
 
         try:
-            yes_token_id, no_token_id = get_tokens_from_slug(slug, markets)
+            market = fetch_market_by_slug(slug)
+            yes_token_id, no_token_id = _parse_clob_token_ids(market)
             hour_open_btc = fetch_hour_open_btc()
             market_hour_label = get_market_hour_label(candidate_dt)
 
