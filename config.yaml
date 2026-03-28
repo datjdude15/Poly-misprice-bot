@@ -1,5 +1,28 @@
+mode: paper
+
+bankroll: 1000
+max_open_exposure: 150
+max_concurrent_positions: 3
+
+min_edge_cents: 35
+min_entry_price: 0.25
+max_entry_price: 0.60
+
+enable_momentum_filter: true
+momentum_min_strength: 30
+
+enable_reversal_confirmation: true
+block_small_trade_setups: true
+
+poll_seconds: 5
+
+telegram_bot_token: "YOUR_BOT_TOKEN"
+telegram_chat_id: "YOUR_CHAT_ID"
+
+database_path: "trades.db"
+
 app:
-  db_path: polysniper_live.db
+  db_path: polysqlive_live.db
   poll_interval_seconds: 5
   live_mode: false
   paper_mode: true
@@ -11,6 +34,8 @@ market:
   no_token_id: "REPLACE_WITH_NO_TOKEN_ID"
   use_public_clob_midpoint: true
   price_source_url: ""
+  hour_open_btc: 66190
+  btc_spot_fallback: 66190
 
 strategy:
   min_edge_cents: 35
@@ -42,12 +67,17 @@ risk:
 execution:
   entry_style: marketable_limit
   tp_large: 0.15
-  sl_large: 0.07
-  tp_medium: 0.10
-  sl_medium: 0.06
-  tp_small: 0.08
-  sl_small: 0.05
+  tp_medium_min: 0.08
+  tp_medium_max: 0.12
+  sl_large_min: 0.06
+  sl_large_max: 0.08
+  sl_medium_min: 0.05
+  sl_medium_max: 0.07
+  time_stop_large_minutes: 20
+  time_stop_large_max_minutes: 30
+  time_stop_medium_minutes: 15
+  time_stop_medium_max_minutes: 20
 
-telegram_bot_token: "YOUR_BOT_TOKEN"
-telegram_chat_id: "YOUR_CHAT_ID"
-database_path: "trades.db"
+shadow:
+  enabled: true
+  log_blocked_trades: true
