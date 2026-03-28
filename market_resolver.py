@@ -2,16 +2,15 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-
 import requests
-
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 
-# Polymarket BTC hourly market slugs are labeled in ET.
-MARKET_TIMEZONE = "America/New_York"
+# ALWAYS use UTC → convert to ET (prevents double offset bug)
+UTC = ZoneInfo("UTC")
+ET = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -23,207 +22,145 @@ class MarketState:
     market_hour_label: str
 
 
-def _to_12h(hour_24: int) -> tuple[int, str]:
-    if hour_24 == 0:
+def _to_12h(hour):
+    if hour == 0:
         return 12, "am"
-    if hour_24 < 12:
-        return hour_24, "am"
-    if hour_24 == 12:
+    if hour < 12:
+        return hour, "am"
+    if hour == 12:
         return 12, "pm"
-    return hour_24 - 12, "pm"
+    return hour - 12, "pm"
 
 
-def build_btc_hourly_slug(dt_et: datetime) -> str:
+def build_slug(dt_et):
     month = dt_et.strftime("%B").lower()
     day = dt_et.day
     year = dt_et.year
     hour_12, suffix = _to_12h(dt_et.hour)
+
     return f"bitcoin-up-or-down-{month}-{day}-{year}-{hour_12}{suffix}-et"
 
 
-def get_market_hour_label(dt_et: datetime) -> str:
-    hour_12, suffix = _to_12h(dt_et.hour)
-    return f"{hour_12}{suffix.upper()} ET"
+def fetch_coinbase_price():
+    r = requests.get(COINBASE_SPOT_URL, timeout=10)
+    r.raise_for_status()
+    return float(r.json()["data"]["amount"])
 
 
-def fetch_coinbase_spot() -> float:
-    resp = requests.get(COINBASE_SPOT_URL, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    return float(data["data"]["amount"])
+def fetch_hour_open():
+    # simple stable fallback
+    return fetch_coinbase_price()
 
 
-def fetch_hour_open_btc() -> float:
-    """
-    Practical fallback to keep the bot running without Binance.
-    Uses current Coinbase spot as temporary hour-open proxy.
-    """
-    return fetch_coinbase_spot()
-
-
-def fetch_all_markets() -> list[dict]:
+def fetch_all_markets():
     markets = []
     offset = 0
-    limit = 100
 
     while True:
-        resp = requests.get(
+        r = requests.get(
             GAMMA_MARKETS_URL,
-            params={"limit": limit, "offset": offset},
-            timeout=20,
+            params={"limit": 100, "offset": offset},
+            timeout=15
         )
-        resp.raise_for_status()
+        r.raise_for_status()
 
-        batch = resp.json()
-        if not isinstance(batch, list) or not batch:
+        batch = r.json()
+        if not batch:
             break
 
         markets.extend(batch)
 
-        if len(batch) < limit:
+        if len(batch) < 100:
             break
 
-        offset += limit
-        if offset >= 1000:
-            break
+        offset += 100
 
     return markets
 
 
-def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
-    raw_tokens = market.get("clobTokenIds", "")
-    raw_outcomes = market.get("outcomes", "")
+def parse_tokens(market):
+    tokens = json.loads(market["clobTokenIds"])
+    outcomes = json.loads(market["outcomes"])
 
-    if not raw_tokens:
-        raise ValueError("Missing clobTokenIds")
-
-    if isinstance(raw_tokens, str):
-        token_ids = json.loads(raw_tokens)
+    # ensure correct mapping
+    if outcomes[0].lower() in ["up", "yes"]:
+        return tokens[0], tokens[1]
     else:
-        token_ids = raw_tokens
-
-    if len(token_ids) < 2:
-        raise ValueError("Expected at least 2 token IDs")
-
-    outcomes = []
-    if raw_outcomes:
-        if isinstance(raw_outcomes, str):
-            outcomes = json.loads(raw_outcomes)
-        elif isinstance(raw_outcomes, list):
-            outcomes = raw_outcomes
-
-    if len(outcomes) >= 2:
-        first = str(outcomes[0]).strip().lower()
-        second = str(outcomes[1]).strip().lower()
-
-        if first in ("up", "yes") and second in ("down", "no"):
-            return str(token_ids[0]), str(token_ids[1])
-
-    return str(token_ids[0]), str(token_ids[1])
+        return tokens[1], tokens[0]
 
 
-def get_tokens_from_slug(slug: str, markets: list[dict]) -> tuple[str, str]:
-    exact_match = None
-    partial_match = None
+def find_market(slug, markets):
+    for m in markets:
+        if m.get("slug") == slug:
+            return m
 
-    for market in markets:
-        market_slug = str(market.get("slug", "")).strip().lower()
-
-        if market_slug == slug.lower():
-            exact_match = market
-            break
-
-        if slug.lower() in market_slug:
-            partial_match = market
-
-    chosen = exact_match or partial_match
-    if not chosen:
-        raise Exception(f"Market not found for slug: {slug}")
-
-    return _parse_clob_token_ids(chosen)
+    raise Exception(f"Market not found for slug: {slug}")
 
 
-def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
-    """
-    Build slug using ET because Polymarket hourly BTC markets are labeled in ET.
-    Critical fix: floor ET time to the current hour so 6:55pm ET resolves
-    the 6pm ET market, not 7pm ET.
-    """
-    now_et = datetime.now(ZoneInfo(MARKET_TIMEZONE))
+def resolve_market():
+    # 🔥 FIX: ALWAYS start from UTC, then convert to ET
+    now_utc = datetime.now(UTC)
+    now_et = now_utc.astimezone(ET)
 
-    # CRITICAL FIX: floor to the current started hour
+    # 🔥 FIX: floor to current hour
     now_et = now_et.replace(minute=0, second=0, microsecond=0)
 
     markets = fetch_all_markets()
 
-    candidate_times = [
+    # try current, previous hour
+    candidates = [
         now_et,
         now_et - timedelta(hours=1),
-        now_et + timedelta(hours=1),
     ]
 
-    last_error = None
-
-    for candidate_dt in candidate_times:
-        slug = build_btc_hourly_slug(candidate_dt)
+    for dt in candidates:
+        slug = build_slug(dt)
 
         try:
-            yes_token_id, no_token_id = get_tokens_from_slug(slug, markets)
-            hour_open_btc = fetch_hour_open_btc()
-            market_hour_label = get_market_hour_label(candidate_dt)
+            market = find_market(slug, markets)
+            yes, no = parse_tokens(market)
+
+            print(f"[RESOLVED] Using slug: {slug}")
 
             return MarketState(
                 slug=slug,
-                yes_token_id=yes_token_id,
-                no_token_id=no_token_id,
-                hour_open_btc=hour_open_btc,
-                market_hour_label=market_hour_label,
+                yes_token_id=yes,
+                no_token_id=no,
+                hour_open_btc=fetch_hour_open(),
+                market_hour_label=f"{_to_12h(dt.hour)[0]}{_to_12h(dt.hour)[1].upper()} ET"
             )
-        except Exception as e:
-            last_error = e
 
-    raise Exception(str(last_error) if last_error else "Unable to resolve market state")
+        except Exception:
+            continue
+
+    raise Exception("No valid market found")
 
 
-def fetch_public_clob_midpoint(token_id: str) -> float | None:
-    if not token_id:
-        return None
-
+def fetch_midpoint(token_id):
     try:
-        resp = requests.get(
+        r = requests.get(
             PUBLIC_CLOB_BOOK_URL,
             params={"token_id": token_id},
-            timeout=15,
+            timeout=10
         )
-        resp.raise_for_status()
-        data = resp.json()
+        r.raise_for_status()
 
+        data = r.json()
         bids = data.get("bids", [])
         asks = data.get("asks", [])
 
-        best_bid = None
-        best_ask = None
+        if bids and asks:
+            bid = max(float(b["price"]) for b in bids)
+            ask = min(float(a["price"]) for a in asks)
+            return round((bid + ask) / 2, 4)
 
         if bids:
-            bid_prices = [float(x["price"]) for x in bids if "price" in x]
-            if bid_prices:
-                best_bid = max(bid_prices)
+            return max(float(b["price"]) for b in bids)
 
         if asks:
-            ask_prices = [float(x["price"]) for x in asks if "price" in x]
-            if ask_prices:
-                best_ask = min(ask_prices)
-
-        if best_bid is not None and best_ask is not None:
-            return round((best_bid + best_ask) / 2, 4)
-
-        if best_bid is not None:
-            return round(best_bid, 4)
-
-        if best_ask is not None:
-            return round(best_ask, 4)
+            return min(float(a["price"]) for a in asks)
 
         return None
 
-    except Exception:
+    except:
         return None
