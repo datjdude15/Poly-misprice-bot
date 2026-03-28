@@ -1,1 +1,5 @@
-requests
+requests>=2.32.0
+PyYAML>=6.0.1
+streamlit>=1.40.0
+pandas>=2.2.0
+plotly>=5.24.0
