@@ -1,38 +1,53 @@
 app:
+  db_path: polysniper_live.db
+  poll_interval_seconds: 5
   live_mode: false
   paper_mode: true
-  poll_interval_seconds: 5
-  db_path: trades.db
+  dashboard_title: PolySniper Live Dashboard
 
 market:
-  # 👇 THIS IS WHAT YOU WERE MISSING
-  price_source_url: "https://your-price-api.com/data"
+  slug: bitcoin-up-or-down-hourly
+  yes_token_id: "REPLACE_WITH_YES_TOKEN_ID"
+  no_token_id: "REPLACE_WITH_NO_TOKEN_ID"
+  use_public_clob_midpoint: true
+  price_source_url: ""
 
 strategy:
-  momentum_window: 5
+  min_edge_cents: 35
+  min_move_abs: 30
+  min_entry_price: 0.25
+  max_entry_price: 0.60
+  small_trade_block_min_price: 0.20
+  require_reversal_confirmation: true
   reversal_confirmation_ticks: 2
+  momentum_window: 6
+  momentum_min_score: 0.55
+  allow_direction:
+    buy_up: true
+    buy_down: true
+  no_trade_min_minutes_left: 5
+  no_trade_max_minutes_left: 55
 
 risk:
   bankroll_usd: 1000
+  next_scale_at_usd: 1150
   kelly_fraction: 0.25
-  min_order_usd: 10
-  max_order_usd: 100
-
+  min_order_usd: 15
+  max_order_usd: 60
+  max_open_exposure_usd: 150
   max_concurrent_positions: 3
-  max_open_exposure_usd: 300
-
   panic_stop_enabled: true
-  panic_stop_daily_loss_usd: 100
+  panic_stop_daily_loss_usd: 75
 
 execution:
-  tp_small: 0.02
-  sl_small: 0.02
-  time_stop_small_min: 10
+  entry_style: marketable_limit
+  tp_large: 0.15
+  sl_large: 0.07
+  tp_medium: 0.10
+  sl_medium: 0.06
+  tp_small: 0.08
+  sl_small: 0.05
 
-  tp_medium: 0.04
-  sl_medium: 0.03
-  time_stop_medium_min: 15
-
-  tp_large: 0.06
-  sl_large: 0.04
-  time_stop_large_min: 20
+telegram_bot_token: "YOUR_BOT_TOKEN"
+telegram_chat_id: "YOUR_CHAT_ID"
+database_path: "trades.db"
