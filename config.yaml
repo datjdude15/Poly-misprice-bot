@@ -21,6 +21,9 @@ telegram_chat_id: ""
 
 database_path: "trades.db"
 
+alerts:
+  cooldown_seconds: 300
+
 app:
   db_path: polysniper_live.db
   poll_interval_seconds: 5
