@@ -1,5 +1,4 @@
 import argparse
-import math
 import sqlite3
 import sys
 import time
@@ -15,8 +14,8 @@ from market_resolver import resolve_current_market_state, fetch_public_clob_midp
 
 @dataclass
 class Position:
-    side: str                  # BUY_UP or BUY_DOWN
-    setup: str                 # CORE
+    side: str
+    setup: str
     entry_price: float
     entry_time: float
     size_usd: float
@@ -57,10 +56,6 @@ class PolyBot:
         self.print_log(f"Loading config from {self.config_path}")
         self.print_log(f"Mode -> {self.mode.upper()}")
         self.print_log(f"Polling every {self.poll_seconds} seconds")
-
-    # -------------------------
-    # Config / DB / Utilities
-    # -------------------------
 
     @staticmethod
     def load_config(path: str) -> dict:
@@ -166,13 +161,17 @@ class PolyBot:
     # -------------------------
 
     def fetch_btc_spot(self) -> Optional[float]:
-        url = "https://api.binance.com/api/v3/ticker/price"
-        params = {"symbol": "BTCUSDT"}
+        """
+        Coinbase spot endpoint avoids the Binance 451 geo-block issue.
+        """
         try:
-            r = requests.get(url, params=params, timeout=10)
+            r = requests.get(
+                "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+                timeout=10
+            )
             r.raise_for_status()
             data = r.json()
-            return float(data["price"])
+            return float(data["data"]["amount"])
         except Exception as e:
             self.print_log(f"BTC fetch failed: {e}")
             return None
@@ -183,7 +182,6 @@ class PolyBot:
         tz_name = market_cfg.get("timezone", "US/Central")
 
         if not auto_switch:
-            # manual fallback
             self.market_slug = market_cfg.get("slug", "")
             self.yes_token_id = market_cfg.get("yes_token_id", "")
             self.no_token_id = market_cfg.get("no_token_id", "")
@@ -220,21 +218,12 @@ class PolyBot:
         return 59 - now.minute
 
     def calculate_expected_up_probability(self, btc_spot: float, hour_open_btc: float, min_move_abs: float) -> float:
-        """
-        Simple directional model:
-        - If BTC is above hour open, Up probability rises with move size
-        - If BTC is below hour open, Up probability falls with move size
-        - Clamped 5% to 95%
-        """
         move = btc_spot - hour_open_btc
         if min_move_abs <= 0:
             min_move_abs = 30.0
 
         scaled = move / min_move_abs
-        # moderate slope
         p_up = 0.50 + (0.12 * scaled)
-
-        # clamp
         p_up = max(0.05, min(0.95, p_up))
         return p_up
 
@@ -274,10 +263,6 @@ class PolyBot:
         btc_spot: float,
         hour_open_btc: float
     ) -> tuple[bool, Optional[str], Optional[str], Optional[float], Optional[str]]:
-        """
-        Returns:
-        (pass, side, setup, entry_price, reason)
-        """
         strategy = self.config.get("strategy", {})
 
         min_edge_cents = float(strategy.get("min_edge_cents", 35))
@@ -309,7 +294,6 @@ class PolyBot:
         if not candidates:
             return False, None, None, None, "FAILED_MIN_EDGE_OR_ENTRY"
 
-        # choose biggest edge
         side, setup, entry_price, _ = max(candidates, key=lambda x: x[3])
         return True, side, setup, entry_price, None
 
