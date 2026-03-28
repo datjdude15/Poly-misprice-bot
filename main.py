@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 CHECK_SECONDS = 1
 COOLDOWN_SECONDS = 60
 NO_TRADE_MINUTES = 5
-CONFIRMATION_CHECKS = 1   # v2.5 loosened from 2 -> 1
+CONFIRMATION_CHECKS = 1
 
 # Core signal thresholds
 EDGE_THRESHOLD = 0.15
@@ -23,7 +23,7 @@ CORE_MIN_MOVE = 30.0
 CORE_MAX_MOVE = 60.0
 
 # Strong setup filters
-MIN_EDGE_CENTS = 27.5     # v2.5 loosened from 30.0 -> 27.5
+MIN_EDGE_CENTS = 25.0      # v2.6 tuned from 27.5 -> 25.0
 CHOP_ZONE_MIN = 0.45
 CHOP_ZONE_MAX = 0.55
 
@@ -47,7 +47,7 @@ SMART_STACK_MAX_PER_SIDE_PER_HOUR = 1
 
 # Reversal confirmation / knife-catch block
 REVERSAL_REQUIRED = True
-MIN_REVERSAL_SIZE = 2.0   # v2.5 loosened from 5.0 -> 2.0
+MIN_REVERSAL_SIZE = 1.0    # v2.6 tuned from 2.0 -> 1.0
 KNIFE_CATCH_BLOCK_ENABLED = True
 
 # Momentum continuation block
@@ -622,7 +622,7 @@ def find_best_active_trade(slug: str, action: str, yes: float, no: float):
         if trade["setup_type"] not in ("CORE", "EXTREME_PULLBACK"):
             continue
 
-        pnl = round(current_price - trade["entry"], 3)
+        pnl = round(price_now_for_trade(trade["action"], yes, no) - trade["entry"], 3)
         candidates.append((pnl, trade))
 
     if not candidates:
@@ -630,6 +630,10 @@ def find_best_active_trade(slug: str, action: str, yes: float, no: float):
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0]
+
+
+def price_now_for_trade(action: str, yes: float, no: float) -> float:
+    return yes if action == "BUY UP" else no
 
 
 def smart_stack_allowed(slug: str, action: str, move: float, edge: float, yes: float, no: float) -> bool:
