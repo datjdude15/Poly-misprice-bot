@@ -42,10 +42,6 @@ def get_risk(cfg: dict) -> dict:
     return cfg.get("risk", {})
 
 
-def get_execution(cfg: dict) -> dict:
-    return cfg.get("execution", {})
-
-
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -54,38 +50,11 @@ def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def probability_up(
-    btc_price: float,
-    hour_open: float,
-    minutes_left: float,
-    momentum_strength: float,
-    cfg: dict,
-) -> float:
-    """
-    Simple first-pass model:
-    - distance from open matters most
-    - momentum is a smaller boost/drag
-    - less time left makes current move matter more
-    """
-    model = cfg.get("model", {})
-
-    dist_scale = float(model.get("distance_scale_usd", 35.0))
-    momentum_weight = float(model.get("momentum_weight", 0.35))
-    time_weight = float(model.get("time_weight", 0.75))
-
-    diff = btc_price - hour_open
-    normalized_diff = diff / dist_scale
-
-    # as the hour gets later, current price relative to open matters more
-    time_factor = 1.0 + time_weight * (1.0 - (minutes_left / 60.0))
-    raw = normalized_diff * time_factor
-
-    # momentum_strength expected roughly 0..100, centered at 50
-    mom_centered = (momentum_strength - 50.0) / 25.0
-    raw += mom_centered * momentum_weight
-
-    prob = sigmoid(raw)
-    return clamp(prob, 0.01, 0.99)
+def fetch_btc_spot_from_coinbase() -> float:
+    url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    return float(r.json()["data"]["amount"])
 
 
 def calc_minutes_left() -> float:
@@ -94,12 +63,6 @@ def calc_minutes_left() -> float:
 
 
 def calc_momentum_strength(price_history: list[float]) -> float:
-    """
-    Returns 0..100
-    50 = neutral
-    Above 50 bullish
-    Below 50 bearish
-    """
     if len(price_history) < 3:
         return 50.0
 
@@ -118,11 +81,30 @@ def calc_momentum_strength(price_history: list[float]) -> float:
     return clamp(raw, 0.0, 100.0)
 
 
-def fetch_btc_spot_from_coinbase() -> float:
-    url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    return float(r.json()["data"]["amount"])
+def probability_up(
+    btc_price: float,
+    hour_open: float,
+    minutes_left: float,
+    momentum_strength: float,
+    cfg: dict,
+) -> float:
+    model = cfg.get("model", {})
+
+    dist_scale = float(model.get("distance_scale_usd", 55.0))
+    momentum_weight = float(model.get("momentum_weight", 0.25))
+    time_weight = float(model.get("time_weight", 0.60))
+
+    diff = btc_price - hour_open
+    normalized_diff = diff / dist_scale
+
+    time_factor = 1.0 + time_weight * (1.0 - (minutes_left / 60.0))
+    raw = normalized_diff * time_factor
+
+    mom_centered = (momentum_strength - 50.0) / 25.0
+    raw += mom_centered * momentum_weight
+
+    prob = sigmoid(raw)
+    return clamp(prob, 0.01, 0.99)
 
 
 def build_signal(
@@ -138,13 +120,13 @@ def build_signal(
     strat = get_strategy(cfg)
 
     min_edge_cents = float(strat.get("min_edge_cents", 35))
-    min_move_abs = float(strat.get("min_move_abs", 30))
+    min_move_abs = float(strat.get("min_move_abs", 45))
     min_entry_price = float(strat.get("min_entry_price", 0.25))
     max_entry_price = float(strat.get("max_entry_price", 0.60))
     small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.20))
     no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 5))
     no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 55))
-    momentum_min_score = float(strat.get("momentum_min_score", 55))
+    momentum_min_score = float(strat.get("momentum_min_score", 58))
 
     prob_down = 1.0 - prob_up
     edge_up_c = (prob_up - yes_price) * 100.0
@@ -226,7 +208,6 @@ def calc_order_size(signal: str, edge_cents: float, cfg: dict) -> tuple[str, flo
     min_order = float(risk.get("min_order_usd", 15))
     max_order = float(risk.get("max_order_usd", 60))
 
-    # simple tier sizing
     if edge_cents >= 50:
         tier = "LARGE"
         size = min(max_order, max(min_order, bankroll * 0.06))
@@ -240,8 +221,38 @@ def calc_order_size(signal: str, edge_cents: float, cfg: dict) -> tuple[str, flo
     return tier, round(size, 2)
 
 
-def maybe_emit_trade(signal_data: dict, market_state, yes_price: float, no_price: float, cfg: dict):
+def send_telegram_alert(cfg: dict, message: str) -> bool:
+    token = str(cfg.get("telegram_bot_token", "")).strip()
+    chat_id = str(cfg.get("telegram_chat_id", "")).strip()
+
+    if not token or not chat_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        log(f"[ALERT_ERROR] Telegram send failed: {e}")
+        return False
+
+
+def maybe_emit_trade(
+    signal_data: dict,
+    market_state,
+    yes_price: float,
+    no_price: float,
+    cfg: dict,
+    alert_cache: dict,
+):
     signal = signal_data["signal"]
+
     if signal == "NO TRADE":
         log(
             f"[PASS] slug={market_state.slug} "
@@ -272,6 +283,34 @@ def maybe_emit_trade(signal_data: dict, market_state, yes_price: float, no_price
         f"mom={signal_data['momentum_strength']}"
     )
 
+    alert_key = f"{market_state.slug}|{signal}"
+    now_ts = time.time()
+    cooldown_seconds = int(cfg.get("alerts", {}).get("cooldown_seconds", 300))
+    last_sent = alert_cache.get(alert_key, 0)
+
+    if now_ts - last_sent < cooldown_seconds:
+        return
+
+    alert_text = (
+        f"PolySniper Signal\n"
+        f"Mode: {mode}\n"
+        f"Slug: {market_state.slug}\n"
+        f"Action: {signal}\n"
+        f"Entry: {entry_price:.3f}\n"
+        f"Edge: {edge_cents}c\n"
+        f"Tier: {tier}\n"
+        f"Size: ${size}\n"
+        f"Prob Up: {signal_data['prob_up']:.3f}\n"
+        f"Prob Down: {signal_data['prob_down']:.3f}\n"
+        f"Momentum: {signal_data['momentum_strength']}\n"
+        f"Hour Open: {market_state.hour_open_btc:.2f}"
+    )
+
+    sent = send_telegram_alert(cfg, alert_text)
+    if sent:
+        alert_cache[alert_key] = now_ts
+        log(f"[ALERT] Telegram alert sent for {alert_key}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -288,6 +327,7 @@ def main():
 
     price_history: list[float] = []
     current_slug = None
+    alert_cache = {}
 
     while True:
         try:
@@ -334,7 +374,14 @@ def main():
                 cfg=cfg,
             )
 
-            maybe_emit_trade(signal_data, market_state, yes_price, no_price, cfg)
+            maybe_emit_trade(
+                signal_data=signal_data,
+                market_state=market_state,
+                yes_price=yes_price,
+                no_price=no_price,
+                cfg=cfg,
+                alert_cache=alert_cache,
+            )
 
         except Exception as e:
             slug_text = current_slug if current_slug else "unknown"
