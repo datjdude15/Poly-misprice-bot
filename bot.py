@@ -1,10 +1,8 @@
 import argparse
-import sqlite3
-import sys
+import math
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 import yaml
@@ -12,487 +10,337 @@ import yaml
 from market_resolver import resolve_current_market_state, fetch_public_clob_midpoint
 
 
-@dataclass
-class Position:
-    side: str
-    setup: str
-    entry_price: float
-    entry_time: float
-    size_usd: float
-    tp_target: float
-    sl_target: float
-    time_stop_minutes: int
-    slug: str
-    yes_price_at_entry: float
-    no_price_at_entry: float
-    hour_open_btc: float
-    btc_at_entry: float
+UTC = ZoneInfo("UTC")
+ET = ZoneInfo("America/New_York")
 
 
-class PolyBot:
-    def __init__(self, config_path: str):
-        self.config_path = config_path
-        self.config = self.load_config(config_path)
+def log(msg: str):
+    now = datetime.now(UTC).strftime("%H:%M:%S")
+    print(f"[{now}] {msg}", flush=True)
 
-        self.mode = self.config.get("mode", "paper")
-        self.poll_seconds = int(self.config.get("poll_seconds", 5))
 
-        self.market_slug: Optional[str] = None
-        self.yes_token_id: Optional[str] = None
-        self.no_token_id: Optional[str] = None
-        self.hour_open_btc: Optional[float] = None
+def load_config(path: str) -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
 
-        self.current_position: Optional[Position] = None
-        self.last_heartbeat_minute: Optional[int] = None
-        self.last_market_refresh_hour_key: Optional[str] = None
 
-        self.telegram_bot_token = self.config.get("telegram_bot_token", "").strip()
-        self.telegram_chat_id = self.config.get("telegram_chat_id", "").strip()
+def get_mode(cfg: dict) -> str:
+    return str(cfg.get("mode", "paper")).lower()
 
-        self.db_path = self.config.get("database_path", "trades.db")
-        self.init_db()
 
-        self.print_log("🚀 BOT STARTING")
-        self.print_log(f"Loading config from {self.config_path}")
-        self.print_log(f"Mode -> {self.mode.upper()}")
-        self.print_log(f"Polling every {self.poll_seconds} seconds")
+def get_poll_seconds(cfg: dict) -> int:
+    if "poll_seconds" in cfg:
+        return int(cfg["poll_seconds"])
+    return int(cfg.get("app", {}).get("poll_interval_seconds", 5))
 
-    @staticmethod
-    def load_config(path: str) -> dict:
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
 
-    def init_db(self):
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
+def get_strategy(cfg: dict) -> dict:
+    return cfg.get("strategy", {})
 
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT,
-            slug TEXT,
-            side TEXT,
-            setup TEXT,
-            entry_price REAL,
-            exit_price REAL,
-            pnl_points REAL,
-            size_usd REAL,
-            approx_pnl_usd REAL,
-            result TEXT,
-            btc_entry REAL,
-            btc_exit REAL,
-            hour_open_btc REAL
+
+def get_risk(cfg: dict) -> dict:
+    return cfg.get("risk", {})
+
+
+def get_execution(cfg: dict) -> dict:
+    return cfg.get("execution", {})
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def probability_up(
+    btc_price: float,
+    hour_open: float,
+    minutes_left: float,
+    momentum_strength: float,
+    cfg: dict,
+) -> float:
+    """
+    Simple first-pass model:
+    - distance from open matters most
+    - momentum is a smaller boost/drag
+    - less time left makes current move matter more
+    """
+    model = cfg.get("model", {})
+
+    dist_scale = float(model.get("distance_scale_usd", 35.0))
+    momentum_weight = float(model.get("momentum_weight", 0.35))
+    time_weight = float(model.get("time_weight", 0.75))
+
+    diff = btc_price - hour_open
+    normalized_diff = diff / dist_scale
+
+    # as the hour gets later, current price relative to open matters more
+    time_factor = 1.0 + time_weight * (1.0 - (minutes_left / 60.0))
+    raw = normalized_diff * time_factor
+
+    # momentum_strength expected roughly 0..100, centered at 50
+    mom_centered = (momentum_strength - 50.0) / 25.0
+    raw += mom_centered * momentum_weight
+
+    prob = sigmoid(raw)
+    return clamp(prob, 0.01, 0.99)
+
+
+def calc_minutes_left() -> float:
+    now_et = datetime.now(ET)
+    return 60.0 - now_et.minute - (now_et.second / 60.0)
+
+
+def calc_momentum_strength(price_history: list[float]) -> float:
+    """
+    Returns 0..100
+    50 = neutral
+    Above 50 bullish
+    Below 50 bearish
+    """
+    if len(price_history) < 3:
+        return 50.0
+
+    first = price_history[0]
+    last = price_history[-1]
+    move = last - first
+
+    deltas = []
+    for i in range(1, len(price_history)):
+        deltas.append(price_history[i] - price_history[i - 1])
+
+    avg_step = sum(deltas) / len(deltas) if deltas else 0.0
+    accel = deltas[-1] - deltas[0] if len(deltas) >= 2 else 0.0
+
+    raw = 50.0 + (move * 0.9) + (avg_step * 8.0) + (accel * 2.0)
+    return clamp(raw, 0.0, 100.0)
+
+
+def fetch_btc_spot_from_coinbase() -> float:
+    url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    return float(r.json()["data"]["amount"])
+
+
+def build_signal(
+    prob_up: float,
+    yes_price: float,
+    no_price: float,
+    btc_price: float,
+    hour_open: float,
+    momentum_strength: float,
+    minutes_left: float,
+    cfg: dict,
+) -> dict:
+    strat = get_strategy(cfg)
+
+    min_edge_cents = float(strat.get("min_edge_cents", 35))
+    min_move_abs = float(strat.get("min_move_abs", 30))
+    min_entry_price = float(strat.get("min_entry_price", 0.25))
+    max_entry_price = float(strat.get("max_entry_price", 0.60))
+    small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.20))
+    no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 5))
+    no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 55))
+    momentum_min_score = float(strat.get("momentum_min_score", 55))
+
+    prob_down = 1.0 - prob_up
+    edge_up_c = (prob_up - yes_price) * 100.0
+    edge_down_c = (prob_down - no_price) * 100.0
+    abs_move = abs(btc_price - hour_open)
+
+    result = {
+        "signal": "NO TRADE",
+        "reason": "",
+        "edge_up_c": round(edge_up_c, 2),
+        "edge_down_c": round(edge_down_c, 2),
+        "prob_up": round(prob_up, 4),
+        "prob_down": round(prob_down, 4),
+        "momentum_strength": round(momentum_strength, 1),
+        "abs_move": round(abs_move, 2),
+    }
+
+    if minutes_left < no_trade_min_minutes_left or minutes_left > no_trade_max_minutes_left:
+        result["reason"] = "FAILED_NO_TRADE_WINDOW"
+        return result
+
+    if yes_price is None or no_price is None:
+        result["reason"] = "FAILED_MISSING_PRICE"
+        return result
+
+    if yes_price < small_trade_block_min_price and no_price < small_trade_block_min_price:
+        result["reason"] = "FAILED_SMALL_TRADE_BLOCK"
+        return result
+
+    if abs_move < min_move_abs:
+        result["reason"] = "FAILED_MIN_MOVE"
+        return result
+
+    bullish_ok = momentum_strength >= momentum_min_score
+    bearish_ok = momentum_strength <= (100.0 - momentum_min_score)
+
+    up_ok = (
+        edge_up_c >= min_edge_cents
+        and min_entry_price <= yes_price <= max_entry_price
+        and bullish_ok
+    )
+
+    down_ok = (
+        edge_down_c >= min_edge_cents
+        and min_entry_price <= no_price <= max_entry_price
+        and bearish_ok
+    )
+
+    if up_ok and edge_up_c >= edge_down_c:
+        result["signal"] = "BUY UP"
+        result["reason"] = "EDGE_UP_CONFIRMED"
+        return result
+
+    if down_ok and edge_down_c > edge_up_c:
+        result["signal"] = "BUY DOWN"
+        result["reason"] = "EDGE_DOWN_CONFIRMED"
+        return result
+
+    if edge_up_c >= min_edge_cents and not bullish_ok:
+        result["reason"] = "FAILED_MOMENTUM_CONFIRMATION"
+        return result
+
+    if edge_down_c >= min_edge_cents and not bearish_ok:
+        result["reason"] = "FAILED_MOMENTUM_CONFIRMATION"
+        return result
+
+    if edge_up_c < min_edge_cents and edge_down_c < min_edge_cents:
+        result["reason"] = "FAILED_MIN_EDGE"
+        return result
+
+    result["reason"] = "FAILED_ENTRY_FILTER"
+    return result
+
+
+def calc_order_size(signal: str, edge_cents: float, cfg: dict) -> tuple[str, float]:
+    risk = get_risk(cfg)
+
+    bankroll = float(risk.get("bankroll_usd", 1000))
+    min_order = float(risk.get("min_order_usd", 15))
+    max_order = float(risk.get("max_order_usd", 60))
+
+    # simple tier sizing
+    if edge_cents >= 50:
+        tier = "LARGE"
+        size = min(max_order, max(min_order, bankroll * 0.06))
+    elif edge_cents >= 40:
+        tier = "MEDIUM"
+        size = min(max_order, max(min_order, bankroll * 0.04))
+    else:
+        tier = "SMALL"
+        size = min(max_order, max(min_order, bankroll * 0.025))
+
+    return tier, round(size, 2)
+
+
+def maybe_emit_trade(signal_data: dict, market_state, yes_price: float, no_price: float, cfg: dict):
+    signal = signal_data["signal"]
+    if signal == "NO TRADE":
+        log(
+            f"[PASS] slug={market_state.slug} "
+            f"reason={signal_data['reason']} "
+            f"prob_up={signal_data['prob_up']:.3f} "
+            f"prob_down={signal_data['prob_down']:.3f} "
+            f"edge_up={signal_data['edge_up_c']}c "
+            f"edge_down={signal_data['edge_down_c']}c "
+            f"mom={signal_data['momentum_strength']}"
         )
-        """)
-
-        conn.commit()
-        conn.close()
-
-    @staticmethod
-    def now_ts() -> float:
-        return time.time()
-
-    @staticmethod
-    def now_utc_str() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    def print_log(self, message: str):
-        now = datetime.now().strftime("[%H:%M:%S]")
-        print(f"{now} {message}", flush=True)
-
-    def telegram_send(self, message: str):
-        if not self.telegram_bot_token or not self.telegram_chat_id:
-            return
-
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage",
-                json={
-                    "chat_id": self.telegram_chat_id,
-                    "text": message
-                },
-                timeout=10
-            )
-        except Exception as e:
-            self.print_log(f"Telegram send failed: {e}")
-
-    def save_trade(
-        self,
-        slug: str,
-        side: str,
-        setup: str,
-        entry_price: float,
-        exit_price: float,
-        pnl_points: float,
-        size_usd: float,
-        approx_pnl_usd: float,
-        result: str,
-        btc_entry: float,
-        btc_exit: float,
-        hour_open_btc: float,
-    ):
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        cur.execute("""
-        INSERT INTO trades (
-            created_at, slug, side, setup, entry_price, exit_price, pnl_points,
-            size_usd, approx_pnl_usd, result, btc_entry, btc_exit, hour_open_btc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            self.now_utc_str(),
-            slug,
-            side,
-            setup,
-            entry_price,
-            exit_price,
-            pnl_points,
-            size_usd,
-            approx_pnl_usd,
-            result,
-            btc_entry,
-            btc_exit,
-            hour_open_btc,
-        ))
-        conn.commit()
-        conn.close()
-
-    # -------------------------
-    # Market Data
-    # -------------------------
-
-    def fetch_btc_spot(self) -> Optional[float]:
-        """
-        Coinbase spot endpoint avoids the Binance 451 geo-block issue.
-        """
-        try:
-            r = requests.get(
-                "https://api.coinbase.com/v2/prices/BTC-USD/spot",
-                timeout=10
-            )
-            r.raise_for_status()
-            data = r.json()
-            return float(data["data"]["amount"])
-        except Exception as e:
-            self.print_log(f"BTC fetch failed: {e}")
-            return None
-
-    def refresh_hourly_market_if_needed(self):
-        market_cfg = self.config.get("market", {})
-        auto_switch = bool(market_cfg.get("auto_switch_hourly", True))
-        tz_name = market_cfg.get("timezone", "US/Central")
-
-        if not auto_switch:
-            self.market_slug = market_cfg.get("slug", "")
-            self.yes_token_id = market_cfg.get("yes_token_id", "")
-            self.no_token_id = market_cfg.get("no_token_id", "")
-            self.hour_open_btc = float(market_cfg.get("hour_open_btc", 0))
-            return
-
-        state = resolve_current_market_state(tz_name=tz_name)
-
-        hour_key = f"{state.slug}|{int(state.hour_open_btc)}"
-        if hour_key != self.last_market_refresh_hour_key:
-            self.market_slug = state.slug
-            self.yes_token_id = state.yes_token_id
-            self.no_token_id = state.no_token_id
-            self.hour_open_btc = state.hour_open_btc
-            self.last_market_refresh_hour_key = hour_key
-
-            self.print_log(f"[AUTO] Switched market -> {self.market_slug}")
-            self.print_log(f"[AUTO] YES token -> {self.yes_token_id}")
-            self.print_log(f"[AUTO] NO token -> {self.no_token_id}")
-            self.print_log(f"[AUTO] Hour open BTC -> {self.hour_open_btc}")
-
-            self.telegram_send(
-                f"🔄 Market switched\n"
-                f"Slug: {self.market_slug}\n"
-                f"Hour Open BTC: {self.hour_open_btc}"
-            )
-
-    # -------------------------
-    # Signal Logic
-    # -------------------------
-
-    def minutes_left_in_hour(self) -> int:
-        now = datetime.now()
-        return 59 - now.minute
-
-    def calculate_expected_up_probability(self, btc_spot: float, hour_open_btc: float, min_move_abs: float) -> float:
-        move = btc_spot - hour_open_btc
-        if min_move_abs <= 0:
-            min_move_abs = 30.0
-
-        scaled = move / min_move_abs
-        p_up = 0.50 + (0.12 * scaled)
-        p_up = max(0.05, min(0.95, p_up))
-        return p_up
-
-    @staticmethod
-    def midpoint_to_edge_cents(fair_prob: float, market_price: float) -> float:
-        return round((fair_prob - market_price) * 100, 2)
-
-    def compute_setup_and_size(self, edge_cents: float) -> tuple[str, float, float, float, int]:
-        risk_cfg = self.config.get("risk", {})
-        exec_cfg = self.config.get("execution", {})
-
-        min_order = float(risk_cfg.get("min_order_usd", 15))
-        max_order = float(risk_cfg.get("max_order_usd", 60))
-        bankroll = float(risk_cfg.get("bankroll_usd", 1000))
-
-        if edge_cents >= 50:
-            tier = "LARGE"
-            cash_size = min(max_order, max(min_order, bankroll * 0.06))
-            tp_target = float(exec_cfg.get("tp_large", 0.15))
-            sl_target = float(exec_cfg.get("sl_large", 0.07))
-            time_stop = int(exec_cfg.get("time_stop_large_minutes", 20))
-        else:
-            tier = "MEDIUM"
-            cash_size = min(max_order, max(min_order, bankroll * 0.04))
-            tp_target = float(exec_cfg.get("tp_medium", 0.10))
-            sl_target = float(exec_cfg.get("sl_medium", 0.06))
-            time_stop = int(exec_cfg.get("time_stop_medium_minutes", 15))
-
-        return tier, cash_size, tp_target, sl_target, time_stop
-
-    def entry_filters_pass(
-        self,
-        yes_mid: float,
-        no_mid: float,
-        edge_up_cents: float,
-        edge_down_cents: float,
-        btc_spot: float,
-        hour_open_btc: float
-    ) -> tuple[bool, Optional[str], Optional[str], Optional[float], Optional[str]]:
-        strategy = self.config.get("strategy", {})
-
-        min_edge_cents = float(strategy.get("min_edge_cents", 35))
-        min_move_abs = float(strategy.get("min_move_abs", 30))
-        min_entry_price = float(strategy.get("min_entry_price", 0.25))
-        max_entry_price = float(strategy.get("max_entry_price", 0.60))
-        no_trade_min_minutes_left = int(strategy.get("no_trade_min_minutes_left", 5))
-        no_trade_max_minutes_left = int(strategy.get("no_trade_max_minutes_left", 55))
-
-        minutes_left = self.minutes_left_in_hour()
-        if minutes_left <= no_trade_min_minutes_left or minutes_left >= no_trade_max_minutes_left:
-            return False, None, None, None, "FAILED_NO_TRADE_WINDOW"
-
-        move = btc_spot - hour_open_btc
-        if abs(move) < min_move_abs:
-            return False, None, None, None, "FAILED_MIN_MOVE"
-
-        buy_up_allowed = bool(strategy.get("allow_direction", {}).get("buy_up", True))
-        buy_down_allowed = bool(strategy.get("allow_direction", {}).get("buy_down", True))
-
-        candidates = []
-
-        if buy_up_allowed and min_entry_price <= yes_mid <= max_entry_price and edge_up_cents >= min_edge_cents:
-            candidates.append(("BUY_UP", "CORE", yes_mid, edge_up_cents))
-
-        if buy_down_allowed and min_entry_price <= no_mid <= max_entry_price and edge_down_cents >= min_edge_cents:
-            candidates.append(("BUY_DOWN", "CORE", no_mid, edge_down_cents))
-
-        if not candidates:
-            return False, None, None, None, "FAILED_MIN_EDGE_OR_ENTRY"
-
-        side, setup, entry_price, _ = max(candidates, key=lambda x: x[3])
-        return True, side, setup, entry_price, None
-
-    # -------------------------
-    # Paper Position Management
-    # -------------------------
-
-    def maybe_open_position(self, yes_mid: float, no_mid: float, btc_spot: float):
-        if self.current_position is not None:
-            return
-
-        strategy = self.config.get("strategy", {})
-        min_move_abs = float(strategy.get("min_move_abs", 30))
-
-        p_up = self.calculate_expected_up_probability(
-            btc_spot=btc_spot,
-            hour_open_btc=self.hour_open_btc,
-            min_move_abs=min_move_abs
-        )
-        p_down = 1.0 - p_up
-
-        edge_up_cents = self.midpoint_to_edge_cents(p_up, yes_mid)
-        edge_down_cents = self.midpoint_to_edge_cents(p_down, no_mid)
-
-        passed, side, setup, entry_price, reason = self.entry_filters_pass(
-            yes_mid=yes_mid,
-            no_mid=no_mid,
-            edge_up_cents=edge_up_cents,
-            edge_down_cents=edge_down_cents,
-            btc_spot=btc_spot,
-            hour_open_btc=self.hour_open_btc
-        )
-
-        self.print_log(
-            f"[TICK] slug={self.market_slug} "
-            f"btc={btc_spot:.2f} open={self.hour_open_btc:.2f} "
-            f"yes={yes_mid:.3f} no={no_mid:.3f} "
-            f"edge_up={edge_up_cents:.1f}c edge_down={edge_down_cents:.1f}c"
-        )
-
-        if not passed:
-            return
-
-        tier, cash_size, tp_target, sl_target, time_stop = self.compute_setup_and_size(
-            edge_up_cents if side == "BUY_UP" else edge_down_cents
-        )
-
-        self.current_position = Position(
-            side=side,
-            setup=setup,
-            entry_price=entry_price,
-            entry_time=self.now_ts(),
-            size_usd=cash_size,
-            tp_target=tp_target,
-            sl_target=sl_target,
-            time_stop_minutes=time_stop,
-            slug=self.market_slug,
-            yes_price_at_entry=yes_mid,
-            no_price_at_entry=no_mid,
-            hour_open_btc=self.hour_open_btc,
-            btc_at_entry=btc_spot
-        )
-
-        msg = (
-            f"SIM START\n"
-            f"{side}\n"
-            f"Setup: {setup}\n"
-            f"Entry: {entry_price:.3f}\n"
-            f"Tier: {tier}\n"
-            f"Cash Size: ${cash_size:.0f}\n"
-            f"TP Target: +{tp_target:.3f}\n"
-            f"SL Target: -{sl_target:.3f}\n"
-            f"Time Stop: {time_stop} min\n"
-            f"Slug: {self.market_slug}"
-        )
-        self.print_log(msg.replace("\n", " | "))
-        self.telegram_send(msg)
-
-    def maybe_close_position(self, yes_mid: float, no_mid: float, btc_spot: float):
-        pos = self.current_position
-        if pos is None:
-            return
-
-        live_price = yes_mid if pos.side == "BUY_UP" else no_mid
-        pnl_points = round(live_price - pos.entry_price, 3)
-        approx_pnl_usd = round(pnl_points * pos.size_usd, 2)
-
-        elapsed_minutes = (self.now_ts() - pos.entry_time) / 60.0
-
-        result = None
-
-        if pnl_points >= pos.tp_target:
-            result = "TP HIT"
-        elif pnl_points <= -pos.sl_target:
-            result = "SL HIT"
-        elif elapsed_minutes >= pos.time_stop_minutes:
-            result = "TIME EXIT"
-
-        if result is None:
-            return
-
-        msg = (
-            f"SIM RESULT\n"
-            f"{result}\n"
-            f"Action: {pos.side}\n"
-            f"Setup: {pos.setup}\n"
-            f"Entry: {pos.entry_price:.3f}\n"
-            f"Exit: {live_price:.3f}\n"
-            f"PnL: {pnl_points:.3f}\n"
-            f"Cash Size: ${pos.size_usd:.0f}\n"
-            f"Approx $PnL: ${approx_pnl_usd:.2f}"
-        )
-
-        self.print_log(msg.replace("\n", " | "))
-        self.telegram_send(msg)
-
-        self.save_trade(
-            slug=pos.slug,
-            side=pos.side,
-            setup=pos.setup,
-            entry_price=pos.entry_price,
-            exit_price=live_price,
-            pnl_points=pnl_points,
-            size_usd=pos.size_usd,
-            approx_pnl_usd=approx_pnl_usd,
-            result=result,
-            btc_entry=pos.btc_at_entry,
-            btc_exit=btc_spot,
-            hour_open_btc=pos.hour_open_btc,
-        )
-
-        self.current_position = None
-
-    # -------------------------
-    # Main loop
-    # -------------------------
-
-    def heartbeat(self):
-        now = datetime.now()
-        if self.last_heartbeat_minute == now.minute:
-            return
-
-        self.last_heartbeat_minute = now.minute
-        self.print_log("Heartbeat... bot running")
-
-    def run(self):
-        while True:
-            try:
-                self.refresh_hourly_market_if_needed()
-
-                if not self.yes_token_id or not self.no_token_id:
-                    self.print_log("Missing token IDs - waiting...")
-                    time.sleep(self.poll_seconds)
-                    continue
-
-                if not self.hour_open_btc or self.hour_open_btc <= 0:
-                    self.print_log("Missing hour_open_btc - waiting...")
-                    time.sleep(self.poll_seconds)
-                    continue
-
-                yes_mid = fetch_public_clob_midpoint(self.yes_token_id)
-                no_mid = fetch_public_clob_midpoint(self.no_token_id)
-                btc_spot = self.fetch_btc_spot()
-
-                self.heartbeat()
-
-                if yes_mid is None or no_mid is None:
-                    self.print_log("Public CLOB mode active but no tick returned")
-                    time.sleep(self.poll_seconds)
-                    continue
-
-                if btc_spot is None:
-                    self.print_log("BTC spot missing - waiting...")
-                    time.sleep(self.poll_seconds)
-                    continue
-
-                if self.mode == "paper":
-                    self.maybe_open_position(yes_mid=yes_mid, no_mid=no_mid, btc_spot=btc_spot)
-                    self.maybe_close_position(yes_mid=yes_mid, no_mid=no_mid, btc_spot=btc_spot)
-                else:
-                    self.print_log("LIVE mode not enabled in this bot file yet. Use paper mode for now.")
-
-                time.sleep(self.poll_seconds)
-
-            except KeyboardInterrupt:
-                self.print_log("Bot stopped by user.")
-                sys.exit(0)
-            except Exception as e:
-                self.print_log(f"Loop error: {e}")
-                time.sleep(self.poll_seconds)
+        return
+
+    edge_cents = signal_data["edge_up_c"] if signal == "BUY UP" else signal_data["edge_down_c"]
+    entry_price = yes_price if signal == "BUY UP" else no_price
+    tier, size = calc_order_size(signal, edge_cents, cfg)
+    mode = get_mode(cfg).upper()
+
+    log(
+        f"[TRADE] mode={mode} "
+        f"slug={market_state.slug} "
+        f"action={signal} "
+        f"entry={entry_price:.3f} "
+        f"edge={edge_cents}c "
+        f"tier={tier} "
+        f"size=${size} "
+        f"prob_up={signal_data['prob_up']:.3f} "
+        f"prob_down={signal_data['prob_down']:.3f} "
+        f"mom={signal_data['momentum_strength']}"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="Path to config YAML")
+    parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
-    bot = PolyBot(args.config)
-    bot.run()
+    cfg = load_config(args.config)
+    poll_seconds = get_poll_seconds(cfg)
+
+    log("🚀 BOT STARTING")
+    log(f"Loading config from {args.config}")
+    log(f"Mode -> {get_mode(cfg).upper()}")
+    log(f"Polling every {poll_seconds} seconds")
+
+    price_history: list[float] = []
+    current_slug = None
+
+    while True:
+        try:
+            market_state = resolve_current_market_state()
+            current_slug = market_state.slug
+
+            btc_price = fetch_btc_spot_from_coinbase()
+            yes_price = fetch_public_clob_midpoint(market_state.yes_token_id)
+            no_price = fetch_public_clob_midpoint(market_state.no_token_id)
+            minutes_left = calc_minutes_left()
+
+            price_history.append(btc_price)
+            if len(price_history) > 12:
+                price_history = price_history[-12:]
+
+            momentum_strength = calc_momentum_strength(price_history)
+
+            prob_up = probability_up(
+                btc_price=btc_price,
+                hour_open=market_state.hour_open_btc,
+                minutes_left=minutes_left,
+                momentum_strength=momentum_strength,
+                cfg=cfg,
+            )
+
+            log(
+                f"[TICK] slug={market_state.slug} "
+                f"btc={btc_price:.2f} "
+                f"open={market_state.hour_open_btc:.2f} "
+                f"yes={yes_price if yes_price is not None else 'None'} "
+                f"no={no_price if no_price is not None else 'None'} "
+                f"mom={momentum_strength:.1f} "
+                f"mins_left={minutes_left:.1f}"
+            )
+
+            signal_data = build_signal(
+                prob_up=prob_up,
+                yes_price=yes_price,
+                no_price=no_price,
+                btc_price=btc_price,
+                hour_open=market_state.hour_open_btc,
+                momentum_strength=momentum_strength,
+                minutes_left=minutes_left,
+                cfg=cfg,
+            )
+
+            maybe_emit_trade(signal_data, market_state, yes_price, no_price, cfg)
+
+        except Exception as e:
+            slug_text = current_slug if current_slug else "unknown"
+            log(f"Loop error: {e} | slug={slug_text}")
+
+        time.sleep(poll_seconds)
 
 
 if __name__ == "__main__":
