@@ -48,6 +48,26 @@ strategy:
   reversal_confirmation_ticks: 2
   momentum_window: 6
   momentum_min_score: 45
+  strategy:
+  min_edge_cents: 35
+  min_move_abs: 30
+  min_entry_price: 0.25
+  max_entry_price: 0.60
+  small_trade_block_min_price: 0.20
+  require_reversal_confirmation: true
+  reversal_confirmation_ticks: 2
+  momentum_window: 6
+  momentum_min_score: 55
+  telegram_trade_alerts: true
+  telegram_near_miss_alerts: true
+  telegram_startup_alerts: false
+  telegram_alert_cooldown_seconds: 300
+  near_miss_ratio: 0.8
+  allow_direction:
+    buy_up: true
+    buy_down: true
+  no_trade_min_minutes_left: 5
+  no_trade_max_minutes_left: 55
   allow_direction:
     buy_up: true
     buy_down: true
