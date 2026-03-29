@@ -14,62 +14,28 @@ model:
 
 strategy:
   min_edge_cents: 25
-  tier2_min_edge_cents: 25
-
   min_move_abs: 1.8
-  strong_edge_override_cents: 40
-
   min_entry_price: 0.01
   max_entry_price: 0.85
   small_trade_block_min_price: 0.01
-
   no_trade_min_minutes_left: 1
   no_trade_max_minutes_left: 59
-
-  momentum_window: 6
   momentum_min_score: 45
-  tier2_min_momentum: 60
+  strong_edge_override_cents: 40
   high_momentum_override_score: 85
-
-  require_reversal_confirmation: false
-  reversal_confirmation_ticks: 2
+  min_prob_trade: 0.56
 
   telegram_trade_alerts: true
   telegram_near_miss_alerts: true
   telegram_startup_alerts: false
   telegram_alert_cooldown_seconds: 300
-  near_miss_ratio: 0.80
-
-  allow_direction:
-    buy_up: true
-    buy_down: true
-
-  min_trade_prob_up: 0.56
-  min_trade_prob_down: 0.54
-  tier2_min_trade_prob_up: 0.55
-  tier2_min_trade_prob_down: 0.55
-
-  large_trade_min_prob: 0.60
-  medium_trade_min_prob: 0.56
-  large_trade_min_momentum: 65
-  medium_trade_min_momentum: 55
-
-  max_trades_per_market_per_hour: 2
-  min_seconds_between_trade_alerts_same_market: 120
-
-  avoid_chase_price: 0.70
-  avoid_chase_move_abs: 25
-
-  tier2_order_usd: 25
+  near_miss_ratio: 0.8
 
 risk:
   bankroll_usd: 1000
   min_order_usd: 15
   max_order_usd: 60
 
-execution:
-  enabled: false
-
 logging:
-  trade_csv_enabled: true
-  trade_csv_path: "trade_log.csv"
+  open_trade_log_path: "open_trades.csv"
+  closed_trade_log_path: "closed_trades.csv"
