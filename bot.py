@@ -131,15 +131,22 @@ def build_signal(
 ) -> dict:
     strat = get_strategy(cfg)
 
-    min_edge_cents = float(strat.get("min_edge_cents", 25))
+    min_edge_cents = float(strat.get("min_edge_cents", 30))
     min_move_abs = float(strat.get("min_move_abs", 3))
-    min_entry_price = float(strat.get("min_entry_price", 0.03))
-    max_entry_price = float(strat.get("max_entry_price", 0.85))
-    small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.01))
-    no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 1))
-    no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 59))
-    momentum_min_score = float(strat.get("momentum_min_score", 45))
-    strong_edge_override_cents = float(strat.get("strong_edge_override_cents", 40))
+    min_entry_price = float(strat.get("min_entry_price", 0.05))
+    max_entry_price = float(strat.get("max_entry_price", 0.75))
+    small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.02))
+    no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 2))
+    no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 58))
+    momentum_min_score = float(strat.get("momentum_min_score", 55))
+    strong_edge_override_cents = float(strat.get("strong_edge_override_cents", 42))
+
+    min_trade_prob_up = float(strat.get("min_trade_prob_up", 0.54))
+    min_trade_prob_down = float(strat.get("min_trade_prob_down", 0.54))
+
+    allow_direction = strat.get("allow_direction", {})
+    allow_buy_up = bool(allow_direction.get("buy_up", True))
+    allow_buy_down = bool(allow_direction.get("buy_down", True))
 
     prob_down = 1.0 - prob_up
     edge_up_c = (prob_up - yes_price) * 100.0
@@ -165,6 +172,10 @@ def build_signal(
             "no_trade_max_minutes_left": no_trade_max_minutes_left,
             "momentum_min_score": momentum_min_score,
             "strong_edge_override_cents": strong_edge_override_cents,
+            "min_trade_prob_up": min_trade_prob_up,
+            "min_trade_prob_down": min_trade_prob_down,
+            "allow_buy_up": allow_buy_up,
+            "allow_buy_down": allow_buy_down,
         },
     }
 
@@ -189,15 +200,19 @@ def build_signal(
     bearish_ok = momentum_strength <= (100.0 - momentum_min_score)
 
     up_ok = (
-        edge_up_c >= min_edge_cents
+        allow_buy_up
+        and edge_up_c >= min_edge_cents
         and min_entry_price <= yes_price <= max_entry_price
         and bullish_ok
+        and prob_up >= min_trade_prob_up
     )
 
     down_ok = (
-        edge_down_c >= min_edge_cents
+        allow_buy_down
+        and edge_down_c >= min_edge_cents
         and min_entry_price <= no_price <= max_entry_price
         and bearish_ok
+        and prob_down >= min_trade_prob_down
     )
 
     if up_ok and edge_up_c >= edge_down_c:
@@ -208,6 +223,14 @@ def build_signal(
     if down_ok and edge_down_c > edge_up_c:
         result["signal"] = "BUY DOWN"
         result["reason"] = "EDGE_DOWN_CONFIRMED"
+        return result
+
+    if edge_up_c >= min_edge_cents and prob_up < min_trade_prob_up:
+        result["reason"] = "FAILED_PROBABILITY_FILTER"
+        return result
+
+    if edge_down_c >= min_edge_cents and prob_down < min_trade_prob_down:
+        result["reason"] = "FAILED_PROBABILITY_FILTER"
         return result
 
     if edge_up_c >= min_edge_cents and not bullish_ok:
@@ -226,23 +249,51 @@ def build_signal(
     return result
 
 
-def calc_order_size(signal: str, edge_cents: float, cfg: dict) -> tuple[str, float]:
+def calc_order_size(
+    signal: str,
+    edge_cents: float,
+    prob_up: float,
+    prob_down: float,
+    momentum_strength: float,
+    abs_move: float,
+    cfg: dict,
+) -> tuple[str, float]:
     risk = get_risk(cfg)
+    strat = get_strategy(cfg)
 
     bankroll = float(risk.get("bankroll_usd", 1000))
     min_order = float(risk.get("min_order_usd", 15))
     max_order = float(risk.get("max_order_usd", 60))
 
-    if edge_cents >= 50:
+    large_trade_min_prob = float(strat.get("large_trade_min_prob", 0.60))
+    medium_trade_min_prob = float(strat.get("medium_trade_min_prob", 0.56))
+    large_trade_min_momentum = float(strat.get("large_trade_min_momentum", 65))
+    medium_trade_min_momentum = float(strat.get("medium_trade_min_momentum", 55))
+    min_move_abs = float(strat.get("min_move_abs", 3))
+
+    trade_prob = prob_up if signal == "BUY UP" else prob_down
+
+    if (
+        edge_cents >= 50
+        and trade_prob >= large_trade_min_prob
+        and momentum_strength >= large_trade_min_momentum
+        and abs_move >= min_move_abs
+    ):
         tier = "LARGE"
         size = min(max_order, max(min_order, bankroll * 0.06))
-    elif edge_cents >= 40:
+        return tier, round(size, 2)
+
+    if (
+        edge_cents >= 40
+        and trade_prob >= medium_trade_min_prob
+        and momentum_strength >= medium_trade_min_momentum
+    ):
         tier = "MEDIUM"
         size = min(max_order, max(min_order, bankroll * 0.04))
-    else:
-        tier = "SMALL"
-        size = min(max_order, max(min_order, bankroll * 0.025))
+        return tier, round(size, 2)
 
+    tier = "SMALL"
+    size = min(max_order, max(min_order, bankroll * 0.025))
     return tier, round(size, 2)
 
 
@@ -280,6 +331,37 @@ def should_send_alert(
     return False
 
 
+def can_emit_trade_for_market(
+    market_slug: str,
+    trade_tracker: dict[str, list[float]],
+    now_ts: float,
+    max_trades_per_market_per_hour: int,
+    min_seconds_between_trade_alerts_same_market: int,
+) -> tuple[bool, str]:
+    history = trade_tracker.get(market_slug, [])
+    history = [ts for ts in history if now_ts - ts < 3600]
+    trade_tracker[market_slug] = history
+
+    if history and now_ts - history[-1] < min_seconds_between_trade_alerts_same_market:
+        return False, "FAILED_MARKET_TRADE_COOLDOWN"
+
+    if len(history) >= max_trades_per_market_per_hour:
+        return False, "FAILED_MAX_TRADES_PER_MARKET"
+
+    return True, ""
+
+
+def record_trade_for_market(
+    market_slug: str,
+    trade_tracker: dict[str, list[float]],
+    now_ts: float,
+):
+    history = trade_tracker.get(market_slug, [])
+    history = [ts for ts in history if now_ts - ts < 3600]
+    history.append(now_ts)
+    trade_tracker[market_slug] = history
+
+
 def maybe_emit_trade(
     signal_data: dict,
     market_state,
@@ -287,6 +369,7 @@ def maybe_emit_trade(
     no_price: float,
     cfg: dict,
     alert_cooldowns: dict[str, float],
+    trade_tracker: dict[str, list[float]],
 ):
     signal = signal_data["signal"]
     mode = get_mode(cfg).upper()
@@ -295,8 +378,13 @@ def maybe_emit_trade(
     trade_alerts_enabled = bool(strat.get("telegram_trade_alerts", True))
     near_miss_alerts_enabled = bool(strat.get("telegram_near_miss_alerts", True))
     alert_cooldown_seconds = int(strat.get("telegram_alert_cooldown_seconds", 300))
-    near_miss_ratio = float(strat.get("near_miss_ratio", 0.8))
-    min_edge_cents = float(strat.get("min_edge_cents", 25))
+    near_miss_ratio = float(strat.get("near_miss_ratio", 0.85))
+    min_edge_cents = float(strat.get("min_edge_cents", 30))
+
+    max_trades_per_market_per_hour = int(strat.get("max_trades_per_market_per_hour", 2))
+    min_seconds_between_trade_alerts_same_market = int(
+        strat.get("min_seconds_between_trade_alerts_same_market", 120)
+    )
 
     now_ts = time.time()
 
@@ -346,9 +434,39 @@ def maybe_emit_trade(
                 send_telegram(cfg, msg)
         return
 
+    allowed, block_reason = can_emit_trade_for_market(
+        market_state.slug,
+        trade_tracker,
+        now_ts,
+        max_trades_per_market_per_hour,
+        min_seconds_between_trade_alerts_same_market,
+    )
+
+    if not allowed:
+        log(
+            f"[PASS] slug={market_state.slug} "
+            f"reason={block_reason} "
+            f"move={signal_data['abs_move']} "
+            f"prob_up={signal_data['prob_up']:.3f} "
+            f"prob_down={signal_data['prob_down']:.3f} "
+            f"edge_up={signal_data['edge_up_c']}c "
+            f"edge_down={signal_data['edge_down_c']}c "
+            f"mom={signal_data['momentum_strength']}"
+        )
+        return
+
     edge_cents = signal_data["edge_up_c"] if signal == "BUY UP" else signal_data["edge_down_c"]
     entry_price = yes_price if signal == "BUY UP" else no_price
-    tier, size = calc_order_size(signal, edge_cents, cfg)
+
+    tier, size = calc_order_size(
+        signal=signal,
+        edge_cents=edge_cents,
+        prob_up=float(signal_data["prob_up"]),
+        prob_down=float(signal_data["prob_down"]),
+        momentum_strength=float(signal_data["momentum_strength"]),
+        abs_move=float(signal_data["abs_move"]),
+        cfg=cfg,
+    )
 
     log(
         f"[TRADE] TRADE BRANCH REACHED "
@@ -364,6 +482,8 @@ def maybe_emit_trade(
         f"prob_down={signal_data['prob_down']:.3f} "
         f"mom={signal_data['momentum_strength']}"
     )
+
+    record_trade_for_market(market_state.slug, trade_tracker, now_ts)
 
     if trade_alerts_enabled:
         alert_key = f"trade:{market_state.slug}:{signal}"
@@ -418,6 +538,7 @@ def main():
     price_history: list[float] = []
     current_slug = None
     alert_cooldowns: dict[str, float] = {}
+    trade_tracker: dict[str, list[float]] = {}
     last_heartbeat_ts = 0.0
 
     while True:
@@ -440,7 +561,6 @@ def main():
                 price_history = price_history[-12:]
 
             momentum_strength = calc_momentum_strength(price_history)
-
             abs_move = abs(btc_price - market_state.hour_open_btc)
 
             prob_up = probability_up(
@@ -480,6 +600,7 @@ def main():
                 no_price,
                 cfg,
                 alert_cooldowns,
+                trade_tracker,
             )
 
         except Exception as e:
