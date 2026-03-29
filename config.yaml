@@ -13,32 +13,53 @@ model:
   time_weight: 0.75
 
 strategy:
-  min_edge_cents: 25
+  # Core entry thresholds
+  min_edge_cents: 30
   min_move_abs: 3
-  min_entry_price: 0.03
-  max_entry_price: 0.85
-  small_trade_block_min_price: 0.01
+  strong_edge_override_cents: 42
 
+  # Entry price controls
+  min_entry_price: 0.05
+  max_entry_price: 0.75
+  small_trade_block_min_price: 0.02
+
+  # Time window
+  no_trade_min_minutes_left: 2
+  no_trade_max_minutes_left: 58
+
+  # Momentum controls
+  momentum_window: 6
+  momentum_min_score: 55
+
+  # Keep this OFF for now
   require_reversal_confirmation: false
   reversal_confirmation_ticks: 2
-  momentum_window: 6
-  momentum_min_score: 45
 
+  # Telegram
   telegram_trade_alerts: true
   telegram_near_miss_alerts: true
   telegram_startup_alerts: false
   telegram_alert_cooldown_seconds: 300
-  near_miss_ratio: 0.8
+  near_miss_ratio: 0.85
 
+  # Directions
   allow_direction:
     buy_up: true
     buy_down: true
 
-  no_trade_min_minutes_left: 1
-  no_trade_max_minutes_left: 59
+  # V2 quality controls
+  min_trade_prob_up: 0.54
+  min_trade_prob_down: 0.54
 
-  # NEW: lets strong-edge trades bypass the hard move filter
-  strong_edge_override_cents: 40
+  # Size guards
+  large_trade_min_prob: 0.60
+  medium_trade_min_prob: 0.56
+  large_trade_min_momentum: 65
+  medium_trade_min_momentum: 55
+
+  # Soft anti-spam / overtrading
+  max_trades_per_market_per_hour: 2
+  min_seconds_between_trade_alerts_same_market: 120
 
 risk:
   bankroll_usd: 1000
