@@ -39,15 +39,15 @@ market:
   price_source_url: ""
 
 strategy:
-  min_edge_cents: 22
-  min_move_abs: 20
-  min_entry_price: 0.15
-  max_entry_price: 0.70
-  small_trade_block_min_price: 0.12
+  min_edge_cents: 30
+  min_move_abs: 15
+  min_entry_price: 0.08
+  max_entry_price: 0.75
+  small_trade_block_min_price: 0.05
   require_reversal_confirmation: true
   reversal_confirmation_ticks: 2
   momentum_window: 6
-  momentum_min_score: 45
+  momentum_min_score: 52
   strategy:
   min_edge_cents: 35
   min_move_abs: 30
@@ -66,8 +66,8 @@ strategy:
   allow_direction:
     buy_up: true
     buy_down: true
-  no_trade_min_minutes_left: 5
-  no_trade_max_minutes_left: 55
+  no_trade_min_minutes_left: 3
+  no_trade_max_minutes_left: 58
   allow_direction:
     buy_up: true
     buy_down: true
