@@ -1,5 +1,8 @@
 import argparse
+import csv
 import math
+import os
+import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -40,10 +43,6 @@ def get_strategy(cfg: dict) -> dict:
 
 def get_risk(cfg: dict) -> dict:
     return cfg.get("risk", {})
-
-
-def get_execution(cfg: dict) -> dict:
-    return cfg.get("execution", {})
 
 
 def get_telegram_token(cfg: dict) -> str:
@@ -217,32 +216,14 @@ def build_signal(
     bullish_ok = momentum_strength >= momentum_min_score
     bearish_ok = momentum_strength <= (100.0 - momentum_min_score)
 
-    if yes_price < min_entry_price or yes_price > max_entry_price:
-        up_entry_ok = False
-    else:
-        up_entry_ok = True
-
-    if no_price < min_entry_price or no_price > max_entry_price:
-        down_entry_ok = False
-    else:
-        down_entry_ok = True
+    up_entry_ok = min_entry_price <= yes_price <= max_entry_price
+    down_entry_ok = min_entry_price <= no_price <= max_entry_price
 
     up_prob_ok = prob_up >= min_prob_trade
     down_prob_ok = prob_down >= min_prob_trade
 
-    up_ok = (
-        edge_up_c >= min_edge_cents
-        and up_entry_ok
-        and bullish_ok
-        and up_prob_ok
-    )
-
-    down_ok = (
-        edge_down_c >= min_edge_cents
-        and down_entry_ok
-        and bearish_ok
-        and down_prob_ok
-    )
+    up_ok = edge_up_c >= min_edge_cents and up_entry_ok and bullish_ok and up_prob_ok
+    down_ok = edge_down_c >= min_edge_cents and down_entry_ok and bearish_ok and down_prob_ok
 
     if up_ok and edge_up_c >= edge_down_c:
         result["signal"] = "BUY UP"
@@ -340,11 +321,178 @@ def should_send_alert(
     return False
 
 
+def extract_market_end_dt_et(slug: str):
+    m = re.match(
+        r"bitcoin-up-or-down-([a-z]+)-(\d{1,2})-(\d{4})-(\d{1,2})(am|pm)-et",
+        slug.lower(),
+    )
+    if not m:
+        return None
+
+    month_name, day_str, year_str, hour_str, ampm = m.groups()
+    month_map = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+    }
+    month = month_map.get(month_name)
+    if month is None:
+        return None
+
+    day = int(day_str)
+    year = int(year_str)
+    hour_12 = int(hour_str)
+
+    if ampm == "am":
+        hour_24 = 0 if hour_12 == 12 else hour_12
+    else:
+        hour_24 = 12 if hour_12 == 12 else hour_12 + 12
+
+    start_dt = datetime(year, month, day, hour_24, 0, 0, tzinfo=ET)
+    end_dt = start_dt.replace(minute=59, second=59)
+    return end_dt
+
+
+def load_open_trades(csv_path: str) -> list[dict]:
+    if not os.path.exists(csv_path):
+        return []
+
+    rows = []
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+    return rows
+
+
+def write_open_trades(csv_path: str, rows: list[dict]):
+    fieldnames = [
+        "trade_id",
+        "timestamp_utc",
+        "slug",
+        "action",
+        "grade",
+        "entry_price",
+        "edge_cents",
+        "prob_up",
+        "prob_down",
+        "momentum",
+        "move",
+        "hour_open_btc",
+        "btc_entry",
+        "resolved",
+        "result",
+        "btc_settle",
+        "settled_at_utc",
+    ]
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def append_closed_trade(cfg: dict, row: dict):
+    csv_path = str(cfg.get("logging", {}).get("closed_trade_log_path", "closed_trades.csv")).strip()
+    file_exists = os.path.exists(csv_path)
+
+    fieldnames = [
+        "trade_id",
+        "timestamp_utc",
+        "slug",
+        "action",
+        "grade",
+        "entry_price",
+        "edge_cents",
+        "prob_up",
+        "prob_down",
+        "momentum",
+        "move",
+        "hour_open_btc",
+        "btc_entry",
+        "result",
+        "btc_settle",
+        "settled_at_utc",
+    ]
+
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def append_open_trade(cfg: dict, row: dict):
+    csv_path = str(cfg.get("logging", {}).get("open_trade_log_path", "open_trades.csv")).strip()
+    rows = load_open_trades(csv_path)
+    rows.append(row)
+    write_open_trades(csv_path, rows)
+
+
+def settle_open_trades(cfg: dict, current_btc_spot: float):
+    csv_path = str(cfg.get("logging", {}).get("open_trade_log_path", "open_trades.csv")).strip()
+    rows = load_open_trades(csv_path)
+    if not rows:
+        return
+
+    now_et = datetime.now(ET)
+    changed = False
+    remaining_rows = []
+
+    for row in rows:
+        if str(row.get("resolved", "")).lower() == "true":
+            continue
+
+        slug = row["slug"]
+        end_dt = extract_market_end_dt_et(slug)
+        if end_dt is None or now_et < end_dt:
+            remaining_rows.append(row)
+            continue
+
+        action = row["action"]
+        hour_open_btc = float(row["hour_open_btc"])
+        btc_settle = float(current_btc_spot)
+
+        if abs(btc_settle - hour_open_btc) < 0.000001:
+            result = "PUSH"
+        elif action == "BUY UP":
+            result = "WIN" if btc_settle > hour_open_btc else "LOSS"
+        else:
+            result = "WIN" if btc_settle < hour_open_btc else "LOSS"
+
+        row["resolved"] = "true"
+        row["result"] = result
+        row["btc_settle"] = f"{btc_settle:.2f}"
+        row["settled_at_utc"] = datetime.now(UTC).isoformat()
+
+        append_closed_trade(cfg, row)
+
+        msg = (
+            f"📘 PAPER RESULT\n"
+            f"Slug: {slug}\n"
+            f"Action: {action}\n"
+            f"Result: {result}\n"
+            f"Hour Open BTC: {hour_open_btc:.2f}\n"
+            f"Settle BTC: {btc_settle:.2f}\n"
+            f"Entry: {row['entry_price']}\n"
+            f"Edge: {row['edge_cents']}c\n"
+            f"Grade: {row['grade']}"
+        )
+        send_telegram(cfg, msg)
+        log(f"[RESULT] {slug} {action} -> {result}")
+        changed = True
+
+    if changed:
+        write_open_trades(csv_path, remaining_rows)
+
+
 def maybe_emit_trade(
     signal_data: dict,
     market_state,
     yes_price: float,
     no_price: float,
+    btc_price: float,
     cfg: dict,
     alert_cooldowns: dict[str, float],
 ):
@@ -432,6 +580,30 @@ def maybe_emit_trade(
         f"mom={signal_data['momentum_strength']}"
     )
 
+    trade_id = f"{market_state.slug}|{signal}|{int(time.time())}"
+    append_open_trade(
+        cfg,
+        {
+            "trade_id": trade_id,
+            "timestamp_utc": datetime.now(UTC).isoformat(),
+            "slug": market_state.slug,
+            "action": signal,
+            "grade": grade,
+            "entry_price": f"{entry_price:.3f}",
+            "edge_cents": f"{edge_cents:.2f}",
+            "prob_up": f"{signal_data['prob_up']:.4f}",
+            "prob_down": f"{signal_data['prob_down']:.4f}",
+            "momentum": f"{signal_data['momentum_strength']:.1f}",
+            "move": f"{signal_data['abs_move']:.2f}",
+            "hour_open_btc": f"{market_state.hour_open_btc:.2f}",
+            "btc_entry": f"{btc_price:.2f}",
+            "resolved": "false",
+            "result": "",
+            "btc_settle": "",
+            "settled_at_utc": "",
+        },
+    )
+
     if trade_alerts_enabled:
         alert_key = f"trade:{market_state.slug}:{signal}:{grade}"
         if should_send_alert(alert_key, alert_cooldowns, alert_cooldown_seconds, now_ts):
@@ -490,15 +662,16 @@ def main():
 
     while True:
         try:
-            now_ts = time.time()
-            if now_ts - last_heartbeat_ts >= 60:
+            if time.time() - last_heartbeat_ts >= 60:
                 log("Heartbeat... bot running")
-                last_heartbeat_ts = now_ts
+                last_heartbeat_ts = time.time()
 
             market_state = resolve_current_market_state()
             current_slug = market_state.slug
 
             btc_price = fetch_btc_spot_from_coinbase()
+            settle_open_trades(cfg, btc_price)
+
             yes_price = fetch_public_clob_midpoint(market_state.yes_token_id)
             no_price = fetch_public_clob_midpoint(market_state.no_token_id)
             minutes_left = calc_minutes_left()
@@ -545,6 +718,7 @@ def main():
                 market_state,
                 yes_price,
                 no_price,
+                btc_price,
                 cfg,
                 alert_cooldowns,
             )
