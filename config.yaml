@@ -14,7 +14,7 @@ model:
 
 strategy:
   min_edge_cents: 30
-  min_move_abs: 3
+  min_move_abs: 2
   strong_edge_override_cents: 42
 
   min_entry_price: 0.05
