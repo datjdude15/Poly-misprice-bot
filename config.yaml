@@ -1,95 +1,49 @@
 mode: paper
-
 poll_seconds: 5
-
-bankroll: 1000
-max_open_exposure: 150
-max_concurrent_positions: 3
-
-min_edge_cents: 22
-min_entry_price: 0.15
-max_entry_price: 0.70
-
-enable_momentum_filter: true
-momentum_min_strength: 45
-
-enable_reversal_confirmation: true
-block_small_trade_setups: true
 
 telegram_bot_token: "8273437550:AAGjoe3kz9notHXxHLJWXCMPfiYzRpSDomU"
 telegram_chat_id: "8485209127"
 
-database_path: "trades.db"
-
-alerts:
-  cooldown_seconds: 300
-
 app:
-  db_path: polysniper_live.db
   poll_interval_seconds: 5
-  live_mode: false
-  paper_mode: true
-  dashboard_title: PolySniper Live Dashboard
 
-market:
-  slug: ""
-  yes_token_id: ""
-  no_token_id: ""
-  use_public_clob_midpoint: true
-  price_source_url: ""
+model:
+  distance_scale_usd: 35.0
+  momentum_weight: 0.35
+  time_weight: 0.75
 
 strategy:
-  strategy:
   min_edge_cents: 25
+  min_move_abs: 3
+  min_entry_price: 0.03
+  max_entry_price: 0.85
+  small_trade_block_min_price: 0.01
 
-  # CRITICAL FIX
-  min_move_abs: 10   # was 30 → too strict
-
-  min_entry_price: 0.05   # allow cheap misprices
-  max_entry_price: 0.75
-
-  small_trade_block_min_price: 0.02
-
-  # TURN THIS OFF for now
   require_reversal_confirmation: false
-
+  reversal_confirmation_ticks: 2
   momentum_window: 6
-  momentum_min_score: 48   # softer
+  momentum_min_score: 45
 
   telegram_trade_alerts: true
   telegram_near_miss_alerts: true
+  telegram_startup_alerts: false
+  telegram_alert_cooldown_seconds: 300
+  near_miss_ratio: 0.8
 
   allow_direction:
     buy_up: true
     buy_down: true
 
-  no_trade_min_minutes_left: 3
-  no_trade_max_minutes_left: 57
+  no_trade_min_minutes_left: 1
+  no_trade_max_minutes_left: 59
+
+  # NEW: lets strong-edge trades bypass the hard move filter
+  strong_edge_override_cents: 40
 
 risk:
   bankroll_usd: 1000
-  next_scale_at_usd: 1150
-  kelly_fraction: 0.25
   min_order_usd: 15
   max_order_usd: 60
-  max_open_exposure_usd: 150
-  max_concurrent_positions: 3
-  panic_stop_enabled: true
-  panic_stop_daily_loss_usd: 75
 
 execution:
-  entry_style: marketable_limit
-  tp_large: 0.15
-  tp_medium: 0.10
-  tp_small: 0.08
-  sl_large: 0.07
-  sl_medium: 0.06
-  sl_small: 0.05
-  time_stop_large_minutes: 20
-  time_stop_medium_minutes: 15
-  time_stop_small_minutes: 12
-
-model:
-  distance_scale_usd: 40.0
-  momentum_weight: 0.18
-  time_weight: 0.50
+  enabled: false
