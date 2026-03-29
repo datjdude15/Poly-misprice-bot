@@ -16,7 +16,7 @@ momentum_min_strength: 45
 enable_reversal_confirmation: true
 block_small_trade_setups: true
 
-telegram_bot_token: "PASTE_YOUR_BOTFATHER_TOKEN_HERE"
+telegram_bot_token: "8273437550:AAHKhK64IdLFfsFCZGob8b0slnYubDrkRx8"
 telegram_chat_id: "8485209127"
 
 database_path: "trades.db"
