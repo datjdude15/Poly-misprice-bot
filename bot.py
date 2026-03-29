@@ -1,71 +1,147 @@
-import argparse
 import time
-import yaml
 import requests
-from datetime import datetime
+import yaml
+import datetime
 
-def now():
-    return datetime.utcnow().strftime("%H:%M:%S")
+# =========================
+# LOAD CONFIG
+# =========================
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
 
-def log(msg: str):
-    print(f"[{now()}] {msg}", flush=True)
+BOT_TOKEN = config["telegram_bot_token"]
+CHAT_ID = config["telegram_chat_id"]
 
-def send_telegram_alert(token: str, chat_id: str, text: str) -> bool:
-    if not token or not chat_id:
-        log("[ALERT] Telegram not configured")
-        return False
+POLL_SECONDS = config.get("poll_seconds", 5)
+EDGE_THRESHOLD = config.get("edge_threshold", 0.08)
+MIN_MOVE = config.get("min_move", 0.003)
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-
+# =========================
+# TELEGRAM
+# =========================
+def send_telegram(message):
     try:
-        r = requests.post(url, json=payload, timeout=15)
-        r.raise_for_status()
-        log("[ALERT] Telegram alert sent successfully")
-        return True
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": message
+        })
     except Exception as e:
-        log(f"[ALERT] Telegram send failed: {e}")
-        return False
+        print(f"[ERROR] Telegram failed: {e}")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--test-alert", action="store_true")
-    args = parser.parse_args()
+# =========================
+# HELPERS
+# =========================
+def log(msg):
+    now = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")
+    print(f"[{now}] {msg}")
 
+# =========================
+# MARKET FETCH (POLYMARKET)
+# =========================
+def get_market():
+    try:
+        r = requests.get("https://gamma-api.polymarket.com/markets")
+        data = r.json()
+
+        for m in data:
+            if "bitcoin-up-or-down" in m["slug"]:
+                return m
+
+    except Exception as e:
+        log(f"[ERROR] Market fetch failed: {e}")
+
+    return None
+
+# =========================
+# EDGE CALC
+# =========================
+def calculate_edge(prob):
+    return prob - 0.5
+
+# =========================
+# MAIN LOOP
+# =========================
+def run():
     log("🚀 BOT STARTING")
-    log(f"Loading config from {args.config}")
-
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
-
-    token = config.get("telegram_bot_token", "")
-    chat_id = str(config.get("telegram_chat_id", ""))
-
-    mode = config.get("mode", "paper")
-    poll_seconds = config.get("poll_seconds", 5)
-
-    log(f"Mode -> {mode.upper()}")
-    log(f"Polling every {poll_seconds} seconds")
-
-    if args.test_alert:
-        sent = send_telegram_alert(
-            token,
-            chat_id,
-            "✅ PolySniperBot test alert successful. Telegram is connected."
-        )
-        if sent:
-            log("Test complete")
-        else:
-            log("Test failed")
-        return
+    log(f"Polling every {POLL_SECONDS}s")
 
     while True:
-        log("Heartbeat... bot running")
-        time.sleep(poll_seconds)
+        market = get_market()
 
+        if not market:
+            log("No market found")
+            time.sleep(POLL_SECONDS)
+            continue
+
+        yes = float(market["outcomes"][0]["price"])
+        no = float(market["outcomes"][1]["price"])
+
+        prob_up = yes
+        prob_down = no
+
+        edge_up = calculate_edge(prob_up)
+        edge_down = calculate_edge(prob_down)
+
+        # =========================
+        # LOG TICK
+        # =========================
+        log(f"[TICK] yes={yes:.3f} no={no:.3f} edge_up={edge_up:.3f}")
+
+        # =========================
+        # TRADE SIGNAL
+        # =========================
+        if edge_up > EDGE_THRESHOLD:
+            msg = (
+                f"🚨 TRADE SIGNAL (UP)\n"
+                f"Price: {yes:.3f}\n"
+                f"Edge: {edge_up:.3f}\n"
+                f"Prob Up: {prob_up:.3f}"
+            )
+            log("[TRADE] UP triggered")
+            send_telegram(msg)
+
+        elif edge_down > EDGE_THRESHOLD:
+            msg = (
+                f"🚨 TRADE SIGNAL (DOWN)\n"
+                f"Price: {no:.3f}\n"
+                f"Edge: {edge_down:.3f}\n"
+                f"Prob Down: {prob_down:.3f}"
+            )
+            log("[TRADE] DOWN triggered")
+            send_telegram(msg)
+
+        # =========================
+        # NEAR MISS ALERT
+        # =========================
+        elif edge_up > EDGE_THRESHOLD * 0.7:
+            msg = (
+                f"⚠️ NEAR MISS (UP)\n"
+                f"Edge: {edge_up:.3f}\n"
+                f"Needed: {EDGE_THRESHOLD:.3f}"
+            )
+            log("[NEAR MISS] UP")
+            send_telegram(msg)
+
+        elif edge_down > EDGE_THRESHOLD * 0.7:
+            msg = (
+                f"⚠️ NEAR MISS (DOWN)\n"
+                f"Edge: {edge_down:.3f}\n"
+                f"Needed: {EDGE_THRESHOLD:.3f}"
+            )
+            log("[NEAR MISS] DOWN")
+            send_telegram(msg)
+
+        # =========================
+        # PASS LOG
+        # =========================
+        else:
+            log("[PASS] No signal")
+
+        time.sleep(POLL_SECONDS)
+
+# =========================
+# ENTRY
+# =========================
 if __name__ == "__main__":
-    main()
+    run()
