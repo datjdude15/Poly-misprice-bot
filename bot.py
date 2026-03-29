@@ -1,6 +1,9 @@
 import argparse
+import csv
 import math
+import os
 import time
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,6 +15,46 @@ from market_resolver import resolve_current_market_state, fetch_public_clob_midp
 
 UTC = ZoneInfo("UTC")
 ET = ZoneInfo("America/New_York")
+
+OPEN_TRADE_FIELDS = [
+    "trade_id",
+    "timestamp_utc",
+    "slug",
+    "action",
+    "grade",
+    "entry_price",
+    "edge_cents",
+    "prob_up",
+    "prob_down",
+    "momentum",
+    "move",
+    "hour_open_btc",
+    "btc_entry",
+    "resolved",
+    "result",
+    "btc_settle",
+    "settled_at_utc",
+]
+
+CLOSED_TRADE_FIELDS = [
+    "trade_id",
+    "timestamp_utc",
+    "slug",
+    "action",
+    "grade",
+    "entry_price",
+    "edge_cents",
+    "prob_up",
+    "prob_down",
+    "momentum",
+    "move",
+    "hour_open_btc",
+    "btc_entry",
+    "resolved",
+    "result",
+    "btc_settle",
+    "settled_at_utc",
+]
 
 
 def log(msg: str):
@@ -42,12 +85,28 @@ def get_risk(cfg: dict) -> dict:
     return cfg.get("risk", {})
 
 
+def get_logging_cfg(cfg: dict) -> dict:
+    return cfg.get("logging", {})
+
+
 def get_telegram_token(cfg: dict) -> str:
     return str(cfg.get("telegram_bot_token", "")).strip()
 
 
 def get_telegram_chat_id(cfg: dict) -> str:
     return str(cfg.get("telegram_chat_id", "")).strip()
+
+
+def get_open_trade_log_path(cfg: dict) -> str:
+    return str(get_logging_cfg(cfg).get("open_trade_log_path", "open_trades.csv")).strip()
+
+
+def get_closed_trade_log_path(cfg: dict) -> str:
+    return str(get_logging_cfg(cfg).get("closed_trade_log_path", "closed_trades.csv")).strip()
+
+
+def get_summary_log_path(cfg: dict) -> str:
+    return str(get_logging_cfg(cfg).get("summary_log_path", "performance_summary.csv")).strip()
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -113,6 +172,16 @@ def fetch_btc_spot_from_coinbase() -> float:
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     return float(r.json()["data"]["amount"])
+
+
+def classify_grade(signal: str, edge_cents: float, prob_up: float, prob_down: float) -> str:
+    directional_prob = prob_up if signal == "BUY UP" else prob_down
+
+    if edge_cents >= 45 and directional_prob >= 0.62:
+        return "TIER1"
+    if edge_cents >= 25 and directional_prob >= 0.56:
+        return "TIER2"
+    return "WATCH"
 
 
 def build_signal(
@@ -240,16 +309,6 @@ def build_signal(
 
     result["reason"] = "FAILED_ENTRY_FILTER"
     return result
-
-
-def classify_grade(signal: str, edge_cents: float, prob_up: float, prob_down: float) -> str:
-    directional_prob = prob_up if signal == "BUY UP" else prob_down
-
-    if edge_cents >= 45 and directional_prob >= 0.62:
-        return "TIER1"
-    if edge_cents >= 25 and directional_prob >= 0.56:
-        return "TIER2"
-    return "WATCH"
 
 
 def calc_order_size(signal: str, edge_cents: float, cfg: dict) -> tuple[str, float]:
