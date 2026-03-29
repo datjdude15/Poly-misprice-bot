@@ -69,12 +69,6 @@ def probability_up(
     momentum_strength: float,
     cfg: dict,
 ) -> float:
-    """
-    Simple first-pass model:
-    - distance from open matters most
-    - momentum is a smaller boost/drag
-    - less time left makes current move matter more
-    """
     model = cfg.get("model", {})
 
     dist_scale = float(model.get("distance_scale_usd", 35.0))
@@ -100,12 +94,6 @@ def calc_minutes_left() -> float:
 
 
 def calc_momentum_strength(price_history: list[float]) -> float:
-    """
-    Returns 0..100
-    50 = neutral
-    Above 50 bullish
-    Below 50 bearish
-    """
     if len(price_history) < 3:
         return 50.0
 
@@ -143,14 +131,15 @@ def build_signal(
 ) -> dict:
     strat = get_strategy(cfg)
 
-    min_edge_cents = float(strat.get("min_edge_cents", 35))
-    min_move_abs = float(strat.get("min_move_abs", 30))
-    min_entry_price = float(strat.get("min_entry_price", 0.25))
-    max_entry_price = float(strat.get("max_entry_price", 0.60))
-    small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.20))
-    no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 5))
-    no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 55))
-    momentum_min_score = float(strat.get("momentum_min_score", 55))
+    min_edge_cents = float(strat.get("min_edge_cents", 25))
+    min_move_abs = float(strat.get("min_move_abs", 3))
+    min_entry_price = float(strat.get("min_entry_price", 0.03))
+    max_entry_price = float(strat.get("max_entry_price", 0.85))
+    small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.01))
+    no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 1))
+    no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 59))
+    momentum_min_score = float(strat.get("momentum_min_score", 45))
+    strong_edge_override_cents = float(strat.get("strong_edge_override_cents", 40))
 
     prob_down = 1.0 - prob_up
     edge_up_c = (prob_up - yes_price) * 100.0
@@ -166,6 +155,17 @@ def build_signal(
         "prob_down": round(prob_down, 4),
         "momentum_strength": round(momentum_strength, 1),
         "abs_move": round(abs_move, 2),
+        "debug": {
+            "min_edge_cents": min_edge_cents,
+            "min_move_abs": min_move_abs,
+            "min_entry_price": min_entry_price,
+            "max_entry_price": max_entry_price,
+            "small_trade_block_min_price": small_trade_block_min_price,
+            "no_trade_min_minutes_left": no_trade_min_minutes_left,
+            "no_trade_max_minutes_left": no_trade_max_minutes_left,
+            "momentum_min_score": momentum_min_score,
+            "strong_edge_override_cents": strong_edge_override_cents,
+        },
     }
 
     if minutes_left < no_trade_min_minutes_left or minutes_left > no_trade_max_minutes_left:
@@ -180,7 +180,8 @@ def build_signal(
         result["reason"] = "FAILED_SMALL_TRADE_BLOCK"
         return result
 
-    if abs_move < min_move_abs:
+    best_edge = max(edge_up_c, edge_down_c)
+    if abs_move < min_move_abs and best_edge < strong_edge_override_cents:
         result["reason"] = "FAILED_MIN_MOVE"
         return result
 
@@ -254,10 +255,7 @@ def send_telegram(cfg: dict, text: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
+    payload = {"chat_id": chat_id, "text": text}
 
     try:
         r = requests.post(url, json=payload, timeout=15)
@@ -298,7 +296,7 @@ def maybe_emit_trade(
     near_miss_alerts_enabled = bool(strat.get("telegram_near_miss_alerts", True))
     alert_cooldown_seconds = int(strat.get("telegram_alert_cooldown_seconds", 300))
     near_miss_ratio = float(strat.get("near_miss_ratio", 0.8))
-    min_edge_cents = float(strat.get("min_edge_cents", 35))
+    min_edge_cents = float(strat.get("min_edge_cents", 25))
 
     now_ts = time.time()
 
@@ -306,11 +304,13 @@ def maybe_emit_trade(
         log(
             f"[PASS] slug={market_state.slug} "
             f"reason={signal_data['reason']} "
+            f"move={signal_data['abs_move']} "
             f"prob_up={signal_data['prob_up']:.3f} "
             f"prob_down={signal_data['prob_down']:.3f} "
             f"edge_up={signal_data['edge_up_c']}c "
             f"edge_down={signal_data['edge_down_c']}c "
-            f"mom={signal_data['momentum_strength']}"
+            f"mom={signal_data['momentum_strength']} "
+            f"thresholds={signal_data['debug']}"
         )
 
         edge_up = float(signal_data["edge_up_c"])
@@ -344,7 +344,6 @@ def maybe_emit_trade(
                     f"BTC: {market_state.hour_open_btc:.2f} open reference"
                 )
                 send_telegram(cfg, msg)
-
         return
 
     edge_cents = signal_data["edge_up_c"] if signal == "BUY UP" else signal_data["edge_down_c"]
@@ -352,13 +351,15 @@ def maybe_emit_trade(
     tier, size = calc_order_size(signal, edge_cents, cfg)
 
     log(
-        f"[TRADE] mode={mode} "
+        f"[TRADE] TRADE BRANCH REACHED "
+        f"mode={mode} "
         f"slug={market_state.slug} "
         f"action={signal} "
         f"entry={entry_price:.3f} "
         f"edge={edge_cents}c "
         f"tier={tier} "
         f"size=${size} "
+        f"move={signal_data['abs_move']} "
         f"prob_up={signal_data['prob_up']:.3f} "
         f"prob_down={signal_data['prob_down']:.3f} "
         f"mom={signal_data['momentum_strength']}"
@@ -376,6 +377,7 @@ def maybe_emit_trade(
                 f"Edge: {edge_cents}c\n"
                 f"Tier: {tier}\n"
                 f"Size: ${size}\n"
+                f"Move: {signal_data['abs_move']}\n"
                 f"Prob Up: {signal_data['prob_up']:.3f}\n"
                 f"Prob Down: {signal_data['prob_down']:.3f}\n"
                 f"Momentum: {signal_data['momentum_strength']}"
@@ -396,6 +398,7 @@ def main():
     log(f"Loading config from {args.config}")
     log(f"Mode -> {get_mode(cfg).upper()}")
     log(f"Polling every {poll_seconds} seconds")
+    log(f"[DEBUG] Active strategy -> {get_strategy(cfg)}")
 
     if args.test_alert:
         ok = send_telegram(cfg, "✅ PolySniperBot test alert successful. Telegram is connected.")
@@ -438,6 +441,8 @@ def main():
 
             momentum_strength = calc_momentum_strength(price_history)
 
+            abs_move = abs(btc_price - market_state.hour_open_btc)
+
             prob_up = probability_up(
                 btc_price=btc_price,
                 hour_open=market_state.hour_open_btc,
@@ -450,6 +455,7 @@ def main():
                 f"[TICK] slug={market_state.slug} "
                 f"btc={btc_price:.2f} "
                 f"open={market_state.hour_open_btc:.2f} "
+                f"move={abs_move:.2f} "
                 f"yes={yes_price if yes_price is not None else 'None'} "
                 f"no={no_price if no_price is not None else 'None'} "
                 f"mom={momentum_strength:.1f} "
