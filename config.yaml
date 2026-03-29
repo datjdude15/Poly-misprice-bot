@@ -13,22 +13,22 @@ model:
   time_weight: 0.75
 
 strategy:
-  min_edge_cents: 25
-  min_move_abs: 1.8
-  min_entry_price: 0.01
-  max_entry_price: 0.85
+  min_edge_cents: 22
+  min_move_abs: 1.2
+  min_entry_price: 0.015
+  max_entry_price: 0.80
   small_trade_block_min_price: 0.01
-  no_trade_min_minutes_left: 1
-  no_trade_max_minutes_left: 59
-  momentum_min_score: 45
-  strong_edge_override_cents: 40
+  no_trade_min_minutes_left: 2
+  no_trade_max_minutes_left: 58
+  momentum_min_score: 42
+  strong_edge_override_cents: 38
   high_momentum_override_score: 85
-  min_prob_trade: 0.56
+  min_prob_trade: 0.55
 
   telegram_trade_alerts: true
-  telegram_near_miss_alerts: true
+  telegram_near_miss_alerts: false
   telegram_startup_alerts: false
-  telegram_alert_cooldown_seconds: 300
+  telegram_alert_cooldown_seconds: 180
   near_miss_ratio: 0.8
 
 risk:
