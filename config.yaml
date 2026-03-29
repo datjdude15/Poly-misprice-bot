@@ -30,6 +30,10 @@ strategy:
   telegram_startup_alerts: false
   telegram_alert_cooldown_seconds: 180
   near_miss_ratio: 0.8
+  
+  scalp_tp_pct: 0.20
+  scalp_sl_pct: 0.12
+  scalp_max_hold_seconds: 480
 
 risk:
   bankroll_usd: 1000
