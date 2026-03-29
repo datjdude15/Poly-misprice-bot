@@ -1,10 +1,10 @@
 import argparse
 import csv
+import json
 import math
 import os
 import time
-import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -16,12 +16,18 @@ from market_resolver import resolve_current_market_state, fetch_public_clob_midp
 UTC = ZoneInfo("UTC")
 ET = ZoneInfo("America/New_York")
 
-OPEN_TRADE_FIELDS = [
+OPEN_TRADES_FILE = "open_trades.csv"
+CLOSED_TRADES_FILE = "closed_trades.csv"
+SUMMARY_FILE = "performance_summary.json"
+
+OPEN_FIELDS = [
     "trade_id",
-    "timestamp_utc",
+    "created_utc",
     "slug",
     "action",
     "grade",
+    "tier",
+    "size_usd",
     "entry_price",
     "edge_cents",
     "prob_up",
@@ -29,19 +35,19 @@ OPEN_TRADE_FIELDS = [
     "momentum",
     "move",
     "hour_open_btc",
-    "btc_entry",
+    "market_hour_end_et",
     "resolved",
-    "result",
-    "btc_settle",
-    "settled_at_utc",
 ]
 
-CLOSED_TRADE_FIELDS = [
+CLOSED_FIELDS = [
     "trade_id",
-    "timestamp_utc",
+    "created_utc",
+    "closed_utc",
     "slug",
     "action",
     "grade",
+    "tier",
+    "size_usd",
     "entry_price",
     "edge_cents",
     "prob_up",
@@ -49,11 +55,11 @@ CLOSED_TRADE_FIELDS = [
     "momentum",
     "move",
     "hour_open_btc",
-    "btc_entry",
+    "market_hour_end_et",
     "resolved",
     "result",
-    "btc_settle",
-    "settled_at_utc",
+    "settle_spot_btc",
+    "pnl_units",
 ]
 
 
@@ -85,10 +91,6 @@ def get_risk(cfg: dict) -> dict:
     return cfg.get("risk", {})
 
 
-def get_logging_cfg(cfg: dict) -> dict:
-    return cfg.get("logging", {})
-
-
 def get_telegram_token(cfg: dict) -> str:
     return str(cfg.get("telegram_bot_token", "")).strip()
 
@@ -97,24 +99,84 @@ def get_telegram_chat_id(cfg: dict) -> str:
     return str(cfg.get("telegram_chat_id", "")).strip()
 
 
-def get_open_trade_log_path(cfg: dict) -> str:
-    return str(get_logging_cfg(cfg).get("open_trade_log_path", "open_trades.csv")).strip()
-
-
-def get_closed_trade_log_path(cfg: dict) -> str:
-    return str(get_logging_cfg(cfg).get("closed_trade_log_path", "closed_trades.csv")).strip()
-
-
-def get_summary_log_path(cfg: dict) -> str:
-    return str(get_logging_cfg(cfg).get("summary_log_path", "performance_summary.csv")).strip()
-
-
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
 def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
+
+
+def ensure_csv(path: str, fieldnames: list[str]):
+    if not os.path.exists(path):
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+
+def read_csv_rows(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
+
+def write_csv_rows(path: str, fieldnames: list[str], rows: list[dict]):
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            filtered = {k: row.get(k, "") for k in fieldnames}
+            writer.writerow(filtered)
+
+
+def append_csv_row(path: str, fieldnames: list[str], row: dict):
+    ensure_csv(path, fieldnames)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        filtered = {k: row.get(k, "") for k in fieldnames}
+        writer.writerow(filtered)
+
+
+def write_summary(closed_rows: list[dict]):
+    total = len(closed_rows)
+    wins = sum(1 for r in closed_rows if r.get("result") == "WIN")
+    losses = sum(1 for r in closed_rows if r.get("result") == "LOSS")
+
+    up_total = sum(1 for r in closed_rows if r.get("action") == "BUY UP")
+    up_wins = sum(1 for r in closed_rows if r.get("action") == "BUY UP" and r.get("result") == "WIN")
+
+    down_total = sum(1 for r in closed_rows if r.get("action") == "BUY DOWN")
+    down_wins = sum(1 for r in closed_rows if r.get("action") == "BUY DOWN" and r.get("result") == "WIN")
+
+    tier1_total = sum(1 for r in closed_rows if r.get("grade") == "TIER1")
+    tier1_wins = sum(1 for r in closed_rows if r.get("grade") == "TIER1" and r.get("result") == "WIN")
+
+    tier2_total = sum(1 for r in closed_rows if r.get("grade") == "TIER2")
+    tier2_wins = sum(1 for r in closed_rows if r.get("grade") == "TIER2" and r.get("result") == "WIN")
+
+    pnl_units = sum(float(r.get("pnl_units", 0) or 0) for r in closed_rows)
+
+    summary = {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round((wins / total) if total else 0.0, 4),
+        "buy_up_total": up_total,
+        "buy_up_win_rate": round((up_wins / up_total) if up_total else 0.0, 4),
+        "buy_down_total": down_total,
+        "buy_down_win_rate": round((down_wins / down_total) if down_total else 0.0, 4),
+        "tier1_total": tier1_total,
+        "tier1_win_rate": round((tier1_wins / tier1_total) if tier1_total else 0.0, 4),
+        "tier2_total": tier2_total,
+        "tier2_win_rate": round((tier2_wins / tier2_total) if tier2_total else 0.0, 4),
+        "net_pnl_units": round(pnl_units, 4),
+        "last_updated_utc": datetime.now(UTC).isoformat(),
+    }
+
+    with open(SUMMARY_FILE, "w") as f:
+        json.dump(summary, f, indent=2)
 
 
 def probability_up(
@@ -197,16 +259,16 @@ def build_signal(
     strat = get_strategy(cfg)
 
     min_edge_cents = float(strat.get("min_edge_cents", 25))
-    min_move_abs = float(strat.get("min_move_abs", 3))
-    min_entry_price = float(strat.get("min_entry_price", 0.03))
+    min_move_abs = float(strat.get("min_move_abs", 1.8))
+    min_entry_price = float(strat.get("min_entry_price", 0.01))
     max_entry_price = float(strat.get("max_entry_price", 0.85))
     small_trade_block_min_price = float(strat.get("small_trade_block_min_price", 0.01))
     no_trade_min_minutes_left = float(strat.get("no_trade_min_minutes_left", 1))
     no_trade_max_minutes_left = float(strat.get("no_trade_max_minutes_left", 59))
     momentum_min_score = float(strat.get("momentum_min_score", 45))
     strong_edge_override_cents = float(strat.get("strong_edge_override_cents", 40))
-    min_prob_trade = float(strat.get("min_prob_trade", 0.56))
     high_momentum_override_score = float(strat.get("high_momentum_override_score", 85))
+    min_prob_trade = float(strat.get("min_prob_trade", 0.56))
 
     prob_down = 1.0 - prob_up
     edge_up_c = (prob_up - yes_price) * 100.0
@@ -222,19 +284,6 @@ def build_signal(
         "prob_down": round(prob_down, 4),
         "momentum_strength": round(momentum_strength, 1),
         "abs_move": round(abs_move, 2),
-        "debug": {
-            "min_edge_cents": min_edge_cents,
-            "min_move_abs": min_move_abs,
-            "min_entry_price": min_entry_price,
-            "max_entry_price": max_entry_price,
-            "small_trade_block_min_price": small_trade_block_min_price,
-            "no_trade_min_minutes_left": no_trade_min_minutes_left,
-            "no_trade_max_minutes_left": no_trade_max_minutes_left,
-            "momentum_min_score": momentum_min_score,
-            "strong_edge_override_cents": strong_edge_override_cents,
-            "min_prob_trade": min_prob_trade,
-            "high_momentum_override_score": high_momentum_override_score,
-        },
     }
 
     if minutes_left < no_trade_min_minutes_left or minutes_left > no_trade_max_minutes_left:
@@ -365,11 +414,122 @@ def should_send_alert(
     return False
 
 
+def get_market_hour_end_et() -> datetime:
+    now_et = datetime.now(ET)
+    top = now_et.replace(minute=0, second=0, microsecond=0)
+    return top + timedelta(hours=1)
+
+
+def trade_exists_for_slug_action(slug: str, action: str) -> bool:
+    rows = read_csv_rows(OPEN_TRADES_FILE)
+    for row in rows:
+        if row.get("slug") == slug and row.get("action") == action and row.get("resolved") != "true":
+            return True
+    return False
+
+
+def log_open_trade(row: dict):
+    ensure_csv(OPEN_TRADES_FILE, OPEN_FIELDS)
+    append_csv_row(OPEN_TRADES_FILE, OPEN_FIELDS, row)
+
+
+def close_trade(open_row: dict, result: str, settle_spot_btc: float):
+    closed_row = dict(open_row)
+    closed_row["resolved"] = "true"
+    closed_row["result"] = result
+    closed_row["settle_spot_btc"] = round(settle_spot_btc, 2)
+    closed_row["closed_utc"] = datetime.now(UTC).isoformat()
+
+    entry_price = float(open_row["entry_price"])
+    size_usd = float(open_row["size_usd"])
+
+    if result == "WIN":
+        pnl_units = size_usd * ((1.0 - entry_price) / max(entry_price, 0.0001))
+    else:
+        pnl_units = -size_usd
+
+    closed_row["pnl_units"] = round(pnl_units, 2)
+
+    append_csv_row(CLOSED_TRADES_FILE, CLOSED_FIELDS, closed_row)
+
+    open_rows = read_csv_rows(OPEN_TRADES_FILE)
+    remaining = []
+    for row in open_rows:
+        if row.get("trade_id") != open_row.get("trade_id"):
+            remaining.append(row)
+    write_csv_rows(OPEN_TRADES_FILE, OPEN_FIELDS, remaining)
+
+    closed_rows = read_csv_rows(CLOSED_TRADES_FILE)
+    write_summary(closed_rows)
+
+
+def settle_paper_trades(cfg: dict):
+    ensure_csv(OPEN_TRADES_FILE, OPEN_FIELDS)
+    ensure_csv(CLOSED_TRADES_FILE, CLOSED_FIELDS)
+
+    open_rows = read_csv_rows(OPEN_TRADES_FILE)
+    if not open_rows:
+        return
+
+    now_et = datetime.now(ET)
+
+    for row in list(open_rows):
+        try:
+            resolved = str(row.get("resolved", "false")).lower() == "true"
+            if resolved:
+                continue
+
+            hour_end_et = datetime.fromisoformat(row["market_hour_end_et"])
+            if now_et < hour_end_et + timedelta(seconds=15):
+                continue
+
+            settle_spot = fetch_btc_spot_from_coinbase()
+            hour_open_btc = float(row["hour_open_btc"])
+            action = row["action"]
+
+            market_went_up = settle_spot > hour_open_btc
+            market_went_down = settle_spot < hour_open_btc
+
+            result = "LOSS"
+            if action == "BUY UP" and market_went_up:
+                result = "WIN"
+            elif action == "BUY DOWN" and market_went_down:
+                result = "WIN"
+            else:
+                result = "LOSS"
+
+            close_trade(row, result, settle_spot)
+
+            summary = {}
+            if os.path.exists(SUMMARY_FILE):
+                with open(SUMMARY_FILE, "r") as f:
+                    summary = json.load(f)
+
+            msg = (
+                f"{'✅' if result == 'WIN' else '❌'} TRADE RESULT: {result}\n"
+                f"Mode: {get_mode(cfg).upper()}\n"
+                f"Action: {action}\n"
+                f"Grade: {row['grade']}\n"
+                f"Slug: {row['slug']}\n"
+                f"Entry: {float(row['entry_price']):.3f}\n"
+                f"Hour Open BTC: {float(row['hour_open_btc']):.2f}\n"
+                f"Settle BTC: {settle_spot:.2f}\n"
+                f"Win Rate: {summary.get('win_rate', 0):.2%}\n"
+                f"Total Trades: {summary.get('total_trades', 0)}"
+            )
+            send_telegram(cfg, msg)
+            log(f"[SETTLE] {row['slug']} {action} -> {result}")
+
+        except Exception as e:
+            log(f"[SETTLE] error: {e}")
+
+
 def maybe_emit_trade(
     signal_data: dict,
     market_state,
     yes_price: float,
     no_price: float,
+    btc_price: float,
     cfg: dict,
     alert_cooldowns: dict[str, float],
 ):
@@ -394,8 +554,7 @@ def maybe_emit_trade(
             f"prob_down={signal_data['prob_down']:.3f} "
             f"edge_up={signal_data['edge_up_c']}c "
             f"edge_down={signal_data['edge_down_c']}c "
-            f"mom={signal_data['momentum_strength']} "
-            f"thresholds={signal_data['debug']}"
+            f"mom={signal_data['momentum_strength']}"
         )
 
         edge_up = float(signal_data["edge_up_c"])
@@ -423,12 +582,16 @@ def maybe_emit_trade(
                     f"Reason Blocked: {signal_data['reason']}\n"
                     f"Entry Price: {entry_price:.3f}\n"
                     f"Edge: {best_edge}c\n"
-                    f"Prob Up: {signal_data['prob_up']:.3f}\n"
-                    f"Prob Down: {signal_data['prob_down']:.3f}\n"
+                    f"Prob Up: {signal_data['prob_up']:.4f}\n"
+                    f"Prob Down: {signal_data['prob_down']:.4f}\n"
                     f"Momentum: {signal_data['momentum_strength']}\n"
                     f"BTC: {market_state.hour_open_btc:.2f} open reference"
                 )
                 send_telegram(cfg, msg)
+        return
+
+    if trade_exists_for_slug_action(market_state.slug, signal):
+        log(f"[TRADE] skipped duplicate open trade for {market_state.slug} {signal}")
         return
 
     edge_cents = signal_data["edge_up_c"] if signal == "BUY UP" else signal_data["edge_down_c"]
@@ -441,9 +604,32 @@ def maybe_emit_trade(
         float(signal_data["prob_down"]),
     )
 
+    market_hour_end_et = get_market_hour_end_et()
+
+    trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
+    open_row = {
+        "trade_id": trade_id,
+        "created_utc": datetime.now(UTC).isoformat(),
+        "slug": market_state.slug,
+        "action": signal,
+        "grade": grade,
+        "tier": tier,
+        "size_usd": size,
+        "entry_price": round(entry_price, 4),
+        "edge_cents": round(edge_cents, 2),
+        "prob_up": round(float(signal_data["prob_up"]), 4),
+        "prob_down": round(float(signal_data["prob_down"]), 4),
+        "momentum": round(float(signal_data["momentum_strength"]), 1),
+        "move": round(float(signal_data["abs_move"]), 2),
+        "hour_open_btc": round(float(market_state.hour_open_btc), 2),
+        "btc_entry": round(float(btc_price), 2),
+        "market_hour_end_et": market_hour_end_et.isoformat(),
+        "resolved": "false",
+    }
+    log_open_trade(open_row)
+
     log(
-        f"[TRADE] TRADE BRANCH REACHED "
-        f"mode={mode} "
+        f"[TRADE] mode={mode} "
         f"slug={market_state.slug} "
         f"action={signal} "
         f"grade={grade} "
@@ -452,8 +638,8 @@ def maybe_emit_trade(
         f"tier={tier} "
         f"size=${size} "
         f"move={signal_data['abs_move']} "
-        f"prob_up={signal_data['prob_up']:.3f} "
-        f"prob_down={signal_data['prob_down']:.3f} "
+        f"prob_up={signal_data['prob_up']:.4f} "
+        f"prob_down={signal_data['prob_down']:.4f} "
         f"mom={signal_data['momentum_strength']}"
     )
 
@@ -487,11 +673,13 @@ def main():
     cfg = load_config(args.config)
     poll_seconds = get_poll_seconds(cfg)
 
+    ensure_csv(OPEN_TRADES_FILE, OPEN_FIELDS)
+    ensure_csv(CLOSED_TRADES_FILE, CLOSED_FIELDS)
+
     log("🚀 BOT STARTING")
     log(f"Loading config from {args.config}")
     log(f"Mode -> {get_mode(cfg).upper()}")
     log(f"Polling every {poll_seconds} seconds")
-    log(f"[DEBUG] Active strategy -> {get_strategy(cfg)}")
 
     if args.test_alert:
         ok = send_telegram(cfg, "✅ PolySniperBot test alert successful. Telegram is connected.")
@@ -512,13 +700,19 @@ def main():
     current_slug = None
     alert_cooldowns: dict[str, float] = {}
     last_heartbeat_ts = 0.0
+    last_settle_check_ts = 0.0
 
     while True:
         try:
             now_ts = time.time()
+
             if now_ts - last_heartbeat_ts >= 60:
                 log("Heartbeat... bot running")
                 last_heartbeat_ts = now_ts
+
+            if now_ts - last_settle_check_ts >= 20:
+                settle_paper_trades(cfg)
+                last_settle_check_ts = now_ts
 
             market_state = resolve_current_market_state()
             current_slug = market_state.slug
@@ -570,6 +764,7 @@ def main():
                 market_state,
                 yes_price,
                 no_price,
+                btc_price,
                 cfg,
                 alert_cooldowns,
             )
