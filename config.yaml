@@ -6,12 +6,12 @@ bankroll: 1000
 max_open_exposure: 150
 max_concurrent_positions: 3
 
-min_edge_cents: 28
-min_entry_price: 0.20
-max_entry_price: 0.65
+min_edge_cents: 22
+min_entry_price: 0.15
+max_entry_price: 0.70
 
 enable_momentum_filter: true
-momentum_min_strength: 50
+momentum_min_strength: 45
 
 enable_reversal_confirmation: true
 block_small_trade_setups: true
@@ -39,15 +39,15 @@ market:
   price_source_url: ""
 
 strategy:
-  min_edge_cents: 28
-  min_move_abs: 30
-  min_entry_price: 0.20
-  max_entry_price: 0.65
-  small_trade_block_min_price: 0.15
+  min_edge_cents: 22
+  min_move_abs: 20
+  min_entry_price: 0.15
+  max_entry_price: 0.70
+  small_trade_block_min_price: 0.12
   require_reversal_confirmation: true
   reversal_confirmation_ticks: 2
   momentum_window: 6
-  momentum_min_score: 50
+  momentum_min_score: 45
   allow_direction:
     buy_up: true
     buy_down: true
@@ -78,6 +78,6 @@ execution:
   time_stop_small_minutes: 12
 
 model:
-  distance_scale_usd: 45.0
-  momentum_weight: 0.20
-  time_weight: 0.55
+  distance_scale_usd: 40.0
+  momentum_weight: 0.18
+  time_weight: 0.50
