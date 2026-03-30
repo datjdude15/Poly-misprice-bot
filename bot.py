@@ -420,13 +420,12 @@ def trade_exists_for_slug_action(cfg: dict, slug: str, action: str) -> bool:
     for row in rows:
         if row.get("slug") == slug and row.get("action") == action:
             return True
-
-    closed_rows = read_csv_rows(get_closed_trades_file(cfg))
-    for row in closed_rows:
-        if row.get("slug") == slug and row.get("action") == action:
-            return True
-
     return False
+
+
+def closed_trade_exists(cfg: dict, trade_id: str) -> bool:
+    rows = read_csv_rows(get_closed_trades_file(cfg))
+    return any(r.get("trade_id") == trade_id for r in rows)
 
 
 def create_open_trade_row(
@@ -490,6 +489,9 @@ def create_open_trade_row(
 
 
 def close_trade_record(cfg: dict, trade_id: str, updated_row: dict):
+    if closed_trade_exists(cfg, trade_id):
+        return
+
     open_rows = read_csv_rows(get_open_trades_file(cfg))
     remaining_rows = [r for r in open_rows if r.get("trade_id") != trade_id]
     write_csv_rows(get_open_trades_file(cfg), OPEN_FIELDS, remaining_rows)
@@ -504,13 +506,23 @@ def monitor_open_trades(cfg: dict):
 
     now_utc = datetime.now(UTC)
     now_et = datetime.now(ET)
-    closed_rows = read_csv_rows(get_closed_trades_file(cfg))
     changed = False
+
+    current_state = None
+    try:
+        current_state = resolve_current_market_state()
+    except Exception:
+        current_state = None
 
     for row in list(open_rows):
         try:
+            trade_id = row["trade_id"]
             action = row["action"]
             slug = row["slug"]
+
+            if closed_trade_exists(cfg, trade_id):
+                changed = True
+                continue
 
             entry_price = float(row["entry_price"])
             tp_price = float(row["tp_price"])
@@ -526,14 +538,12 @@ def monitor_open_trades(cfg: dict):
             same_hour_active = now_et < market_hour_end_et
 
             midpoint = None
-            if same_hour_active:
+            if same_hour_active and current_state is not None and current_state.slug == slug:
                 try:
-                    current_state = resolve_current_market_state()
-                    if current_state.slug == slug:
-                        if action == "BUY UP":
-                            midpoint = fetch_public_clob_midpoint(current_state.yes_token_id)
-                        else:
-                            midpoint = fetch_public_clob_midpoint(current_state.no_token_id)
+                    if action == "BUY UP":
+                        midpoint = fetch_public_clob_midpoint(current_state.yes_token_id)
+                    else:
+                        midpoint = fetch_public_clob_midpoint(current_state.no_token_id)
                 except Exception:
                     midpoint = None
 
@@ -549,12 +559,15 @@ def monitor_open_trades(cfg: dict):
                         exit_reason = "SL"
                         exit_price = midpoint
 
-                if exit_reason is None and now_utc >= time_exit_deadline_utc:
-                    if midpoint is not None:
-                        exit_reason = "TIME_EXIT"
-                        exit_price = midpoint
+                if exit_reason is None and now_utc >= time_exit_deadline_utc and midpoint is not None:
+                    exit_reason = "TIME_EXIT"
+                    exit_price = midpoint
 
                 if exit_reason is not None and exit_price is not None:
+                    if closed_trade_exists(cfg, trade_id):
+                        changed = True
+                        continue
+
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
                     scalp_result = "WIN" if pnl_pct > 0 else "LOSS"
 
@@ -578,7 +591,12 @@ def monitor_open_trades(cfg: dict):
                             f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
                         ),
                     )
-                    changed = True
+
+                    if row.get("settle_status") == "CLOSED":
+                        close_trade_record(cfg, trade_id, row)
+                    else:
+                        changed = True
+                    continue
 
             if settle_status == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
                 settle_btc = fetch_btc_spot_from_coinbase()
@@ -609,16 +627,22 @@ def monitor_open_trades(cfg: dict):
                         f"Result: {settle_result}"
                     ),
                 )
-                changed = True
 
-            if row.get("scalp_status") != "OPEN" and row.get("settle_status") == "CLOSED":
-                close_trade_record(cfg, row["trade_id"], row)
-                changed = True
+                if row.get("scalp_status") != "OPEN":
+                    close_trade_record(cfg, trade_id, row)
+                else:
+                    changed = True
+                continue
 
         except Exception as e:
             log(f"[TRACKER] error monitoring trade: {e}")
 
     if changed:
+        fresh_rows = [
+            r for r in read_csv_rows(get_open_trades_file(cfg))
+            if not closed_trade_exists(cfg, r.get("trade_id", ""))
+        ]
+        write_csv_rows(get_open_trades_file(cfg), OPEN_FIELDS, fresh_rows)
         write_summary(cfg)
 
 
