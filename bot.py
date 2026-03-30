@@ -580,14 +580,22 @@ def monitor_open_trades(cfg: dict):
                     send_telegram(
                         cfg,
                         (
-                            f"{'✅' if scalp_result == 'WIN' else '❌'} TRADE CLOSED\n"
-                            f"Mode: {get_mode(cfg).upper()}\n"
-                            f"Action: {action}\n"
-                            f"Grade: {row['grade']}\n"
-                            f"Slug: {slug}\n"
-                            f"Entry: {entry_price:.3f}\n"
-                            f"Exit: {float(row['scalp_exit_price']):.3f}\n"
-                            f"Reason: {exit_reason}\n"
+                            f"{'✅' if scalp_result == 'WIN' else '❌'} TRADE CLOSED
+"
+                            f"Mode: {get_mode(cfg).upper()}
+"
+                            f"Action: {action}
+"
+                            f"Grade: {row['grade']}
+"
+                            f"Slug: {slug}
+"
+                            f"Entry: {entry_price:.3f}
+"
+                            f"Exit: {float(row['scalp_exit_price']):.3f}
+"
+                            f"Reason: {exit_reason}
+"
                             f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
                         ),
                     )
@@ -617,13 +625,20 @@ def monitor_open_trades(cfg: dict):
                 send_telegram(
                     cfg,
                     (
-                        f"{'✅' if settle_result == 'WIN' else '❌'} FINAL SETTLE RESULT\n"
-                        f"Mode: {get_mode(cfg).upper()}\n"
-                        f"Action: {action}\n"
-                        f"Grade: {row['grade']}\n"
-                        f"Slug: {slug}\n"
-                        f"Hour Open BTC: {hour_open_btc:.2f}\n"
-                        f"Settle BTC: {settle_btc:.2f}\n"
+                        f"{'✅' if settle_result == 'WIN' else '❌'} FINAL SETTLE RESULT
+"
+                        f"Mode: {get_mode(cfg).upper()}
+"
+                        f"Action: {action}
+"
+                        f"Grade: {row['grade']}
+"
+                        f"Slug: {slug}
+"
+                        f"Hour Open BTC: {hour_open_btc:.2f}
+"
+                        f"Settle BTC: {settle_btc:.2f}
+"
                         f"Result: {settle_result}"
                     ),
                 )
@@ -701,15 +716,24 @@ def maybe_emit_trade(
             if should_send_alert(alert_key, alert_cooldowns, alert_cooldown_seconds, now_ts):
                 entry_price = yes_price if best_side == "UP" else no_price
                 msg = (
-                    f"⚠️ NEAR MISS ({best_side})\n"
-                    f"Mode: {mode}\n"
-                    f"Slug: {market_state.slug}\n"
-                    f"Reason Blocked: {signal_data['reason']}\n"
-                    f"Entry Price: {entry_price:.3f}\n"
-                    f"Edge: {best_edge}c\n"
-                    f"Prob Up: {signal_data['prob_up']:.4f}\n"
-                    f"Prob Down: {signal_data['prob_down']:.4f}\n"
-                    f"Momentum: {signal_data['momentum_strength']}\n"
+                    f"⚠️ NEAR MISS ({best_side})
+"
+                    f"Mode: {mode}
+"
+                    f"Slug: {market_state.slug}
+"
+                    f"Reason Blocked: {signal_data['reason']}
+"
+                    f"Entry Price: {entry_price:.3f}
+"
+                    f"Edge: {best_edge}c
+"
+                    f"Prob Up: {signal_data['prob_up']:.4f}
+"
+                    f"Prob Down: {signal_data['prob_down']:.4f}
+"
+                    f"Momentum: {signal_data['momentum_strength']}
+"
                     f"BTC: {market_state.hour_open_btc:.2f} open reference"
                 )
                 send_telegram(cfg, msg)
@@ -762,18 +786,30 @@ def maybe_emit_trade(
         alert_key = f"trade:{market_state.slug}:{signal}"
         if should_send_alert(alert_key, alert_cooldowns, alert_cooldown_seconds, now_ts):
             msg = (
-                f"🚨 TRADE SIGNAL\n"
-                f"Mode: {mode}\n"
-                f"Action: {signal}\n"
-                f"Grade: {grade}\n"
-                f"Slug: {market_state.slug}\n"
-                f"Entry: {entry_price:.3f}\n"
-                f"Edge: {edge_cents}c\n"
-                f"Tier: {tier}\n"
-                f"Size: ${size}\n"
-                f"Move: {signal_data['abs_move']}\n"
-                f"Prob Up: {signal_data['prob_up']:.4f}\n"
-                f"Prob Down: {signal_data['prob_down']:.4f}\n"
+                f"🚨 TRADE SIGNAL
+"
+                f"Mode: {mode}
+"
+                f"Action: {signal}
+"
+                f"Grade: {grade}
+"
+                f"Slug: {market_state.slug}
+"
+                f"Entry: {entry_price:.3f}
+"
+                f"Edge: {edge_cents}c
+"
+                f"Tier: {tier}
+"
+                f"Size: ${size}
+"
+                f"Move: {signal_data['abs_move']}
+"
+                f"Prob Up: {signal_data['prob_up']:.4f}
+"
+                f"Prob Down: {signal_data['prob_down']:.4f}
+"
                 f"Momentum: {signal_data['momentum_strength']}"
             )
             send_telegram(cfg, msg)
@@ -786,6 +822,17 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    # ONE-TIME RESET BLOCK. REMOVE AFTER ONE CLEAN DEPLOY.
+    for path in [
+        get_open_trades_file(cfg),
+        get_closed_trades_file(cfg),
+        get_summary_file(cfg),
+    ]:
+        if os.path.exists(path):
+            os.remove(path)
+            log(f"[RESET] deleted {path}")
+
     poll_seconds = get_poll_seconds(cfg)
 
     ensure_csv(get_open_trades_file(cfg), OPEN_FIELDS)
@@ -805,7 +852,9 @@ def main():
     if startup_alerts:
         send_telegram(
             cfg,
-            f"🟢 PolySniperBot online\nMode: {get_mode(cfg).upper()}\nPoll: {poll_seconds}s",
+            f"🟢 PolySniperBot online
+Mode: {get_mode(cfg).upper()}
+Poll: {poll_seconds}s",
         )
 
     price_history: list[float] = []
