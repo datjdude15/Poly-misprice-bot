@@ -502,55 +502,114 @@ def close_trade_record(cfg: dict, trade_id: str, updated_row: dict):
     write_summary(cfg)
 
 
-def monitor_open_trades(cfg: dict):
-    open_rows = read_csv_rows(get_open_trades_file(cfg))
+import csv
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+UTC = ZoneInfo("UTC")
+ET = ZoneInfo("America/New_York")
+
+def dedupe_open_rows(rows):
+    """Keep only one OPEN row per unique trade_id."""
+    seen = set()
+    clean = []
+    for row in rows:
+        tid = row.get("trade_id")
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        clean.append(row)
+    return clean
+
+
+def safe_close_trade_record(read_csv_rows, write_csv_rows, append_csv_row,
+                            open_path, closed_path, open_fields, closed_fields,
+                            trade_id, updated_row):
+    """
+    Anti-spam close:
+    - removes ALL matching open rows
+    - checks closed file before appending
+    """
+    open_rows = read_csv_rows(open_path)
+    closed_rows = read_csv_rows(closed_path)
+
+    # already closed? do nothing
+    for row in closed_rows:
+        if row.get("trade_id") == trade_id:
+            return False
+
+    remaining = [r for r in open_rows if r.get("trade_id") != trade_id]
+    remaining = dedupe_open_rows(remaining)
+
+    write_csv_rows(open_path, open_fields, remaining)
+    append_csv_row(closed_path, closed_fields, updated_row)
+    return True
+
+
+def monitor_open_trades_anti_spam(
+    cfg,
+    read_csv_rows,
+    write_csv_rows,
+    append_csv_row,
+    get_open_trades_file,
+    get_closed_trades_file,
+    OPEN_FIELDS,
+    CLOSED_FIELDS,
+    resolve_current_market_state,
+    fetch_public_clob_midpoint,
+    fetch_btc_spot_from_coinbase,
+    send_telegram,
+    get_mode,
+):
+    """
+    Drop-in replacement for your monitor_open_trades().
+    Prevents duplicate TP/SL spam.
+    """
+    open_path = get_open_trades_file(cfg)
+    closed_path = get_closed_trades_file(cfg)
+
+    open_rows = dedupe_open_rows(read_csv_rows(open_path))
+    write_csv_rows(open_path, OPEN_FIELDS, open_rows)
+
     if not open_rows:
         return
 
     now_utc = datetime.now(UTC)
     now_et = datetime.now(ET)
+
     changed = False
+    rows_to_keep = []
 
-    current_state = None
-    try:
-        current_state = resolve_current_market_state()
-    except Exception:
-        current_state = None
-
-    for row in list(open_rows):
+    for row in open_rows:
         try:
-            trade_id = row["trade_id"]
+            # HARD STOP: if already closed, never alert again
+            if row.get("scalp_status") in ("WIN", "LOSS") and row.get("settle_status") == "CLOSED":
+                continue
+
             action = row["action"]
             slug = row["slug"]
-
-            if closed_trade_exists(cfg, trade_id):
-                changed = True
-                continue
+            trade_id = row["trade_id"]
 
             entry_price = float(row["entry_price"])
             tp_price = float(row["tp_price"])
             sl_price = float(row["sl_price"])
             hour_open_btc = float(row["hour_open_btc"])
 
-            scalp_status = row.get("scalp_status", "OPEN")
-            settle_status = row.get("settle_status", "OPEN")
-
             market_hour_end_et = datetime.fromisoformat(row["market_hour_end_et"])
-            time_exit_deadline_utc = datetime.fromisoformat(row["time_exit_deadline_utc"])
-
-            same_hour_active = now_et < market_hour_end_et
+            deadline_utc = datetime.fromisoformat(row["time_exit_deadline_utc"])
 
             midpoint = None
-            if same_hour_active and current_state is not None and current_state.slug == slug:
+            if now_et < market_hour_end_et:
                 try:
-                    if action == "BUY UP":
-                        midpoint = fetch_public_clob_midpoint(current_state.yes_token_id)
-                    else:
-                        midpoint = fetch_public_clob_midpoint(current_state.no_token_id)
+                    state = resolve_current_market_state()
+                    if state.slug == slug:
+                        token = state.yes_token_id if action == "BUY UP" else state.no_token_id
+                        midpoint = fetch_public_clob_midpoint(token)
                 except Exception:
                     midpoint = None
 
-            if scalp_status == "OPEN":
+            # ---- SCALP EXIT ----
+            if row.get("scalp_status", "OPEN") == "OPEN":
                 exit_reason = None
                 exit_price = None
 
@@ -562,14 +621,13 @@ def monitor_open_trades(cfg: dict):
                         exit_reason = "SL"
                         exit_price = midpoint
 
-                if exit_reason is None and now_utc >= time_exit_deadline_utc and midpoint is not None:
+                if exit_reason is None and now_utc >= deadline_utc and midpoint is not None:
                     exit_reason = "TIME_EXIT"
                     exit_price = midpoint
 
-                if exit_reason is not None and exit_price is not None:
+                if exit_reason and exit_price is not None:
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
                     scalp_result = "WIN" if pnl_pct > 0 else "LOSS"
-                    icon = "✅" if scalp_result == "WIN" else "❌"
 
                     row["scalp_status"] = scalp_result
                     row["scalp_exit_reason"] = exit_reason
@@ -579,7 +637,7 @@ def monitor_open_trades(cfg: dict):
 
                     send_telegram(
                         cfg,
-                        f"{icon} TRADE CLOSED\n"
+                        f"{'✅' if scalp_result == 'WIN' else '❌'} TRADE CLOSED\n"
                         f"Mode: {get_mode(cfg).upper()}\n"
                         f"Action: {action}\n"
                         f"Grade: {row['grade']}\n"
@@ -591,46 +649,45 @@ def monitor_open_trades(cfg: dict):
                     )
                     changed = True
 
-            if settle_status == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
+            # ---- FINAL SETTLE ----
+            if row.get("settle_status", "OPEN") == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
                 settle_btc = fetch_btc_spot_from_coinbase()
-                settle_result = "WIN" if (
-                    (action == "BUY UP" and settle_btc > hour_open_btc)
-                    or (action == "BUY DOWN" and settle_btc < hour_open_btc)
-                ) else "LOSS"
+                went_up = settle_btc > hour_open_btc
+
+                if action == "BUY UP":
+                    settle_result = "WIN" if went_up else "LOSS"
+                else:
+                    settle_result = "WIN" if not went_up else "LOSS"
 
                 row["settle_status"] = "CLOSED"
                 row["settle_result"] = settle_result
                 row["settle_btc"] = round(settle_btc, 2)
                 row["settle_utc"] = now_utc.isoformat()
+                changed = True
 
-                icon = "✅" if settle_result == "WIN" else "❌"
-                send_telegram(
-                    cfg,
-                    f"{icon} FINAL SETTLE RESULT\n"
-                    f"Mode: {get_mode(cfg).upper()}\n"
-                    f"Action: {action}\n"
-                    f"Grade: {row['grade']}\n"
-                    f"Slug: {slug}\n"
-                    f"Hour Open BTC: {hour_open_btc:.2f}\n"
-                    f"Settle BTC: {settle_btc:.2f}\n"
-                    f"Result: {settle_result}"
+            # move to closed only once
+            if row.get("scalp_status") in ("WIN", "LOSS") and row.get("settle_status") == "CLOSED":
+                safe_close_trade_record(
+                    read_csv_rows,
+                    write_csv_rows,
+                    append_csv_row,
+                    open_path,
+                    closed_path,
+                    OPEN_FIELDS,
+                    CLOSED_FIELDS,
+                    trade_id,
+                    row,
                 )
                 changed = True
+                continue
 
-            if row.get("scalp_status") != "OPEN" and row.get("settle_status") == "CLOSED":
-                close_trade_record(cfg, trade_id, row)
-                changed = True
+            rows_to_keep.append(row)
 
-        except Exception as e:
-            log(f"[TRACKER] error monitoring trade: {e}")
+        except Exception:
+            rows_to_keep.append(row)
 
     if changed:
-        fresh_rows = [
-            r for r in read_csv_rows(get_open_trades_file(cfg))
-            if not closed_trade_exists(cfg, r.get("trade_id", ""))
-        ]
-        write_csv_rows(get_open_trades_file(cfg), OPEN_FIELDS, fresh_rows)
-        write_summary(cfg)
+        write_csv_rows(open_path, OPEN_FIELDS, dedupe_open_rows(rows_to_keep))
 
 
 def maybe_emit_trade(
