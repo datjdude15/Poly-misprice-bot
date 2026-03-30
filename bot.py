@@ -580,8 +580,9 @@ def monitor_open_trades(cfg: dict):
                     if state.slug == slug:
                         token = state.yes_token_id if action == "BUY UP" else state.no_token_id
                         midpoint = fetch_public_clob_midpoint(token)
-                except Exception:
-                    midpoint = None
+                        except Exception as e:
+            log(f"[TRACKER] midpoint fetch failed: {e}")
+            midpoint = None
 
             # ---- SCALP EXIT ----
             if row.get("scalp_status", "OPEN") == "OPEN":
