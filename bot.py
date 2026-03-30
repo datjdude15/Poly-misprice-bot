@@ -539,7 +539,7 @@ def safe_close_trade_record(read_csv_rows, write_csv_rows, append_csv_row,
     return True
 
 
-def monitor_open_trades(cfg: dict):"
+def monitor_open_trades(cfg: dict):
     open_path = get_open_trades_file(cfg)
     closed_path = get_closed_trades_file(cfg)
 
@@ -630,6 +630,11 @@ def monitor_open_trades(cfg: dict):"
             if row.get("settle_status", "OPEN") == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
                 settle_btc = fetch_btc_spot_from_coinbase()
                 went_up = settle_btc > hour_open_btc
+                                
+                if action == "BUY UP":
+                    settle_result = "WIN" if went_up else "LOSS"
+                else:
+                    settle_result = "WIN" if not went_up else "LOSS"
 
                 row["settle_status"] = "CLOSED"
                 row["settle_result"] = settle_result
