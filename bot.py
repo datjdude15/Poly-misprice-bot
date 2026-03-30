@@ -539,7 +539,7 @@ def safe_close_trade_record(read_csv_rows, write_csv_rows, append_csv_row,
     return True
 
 
-def monitor_open_trades_anti_spam(
+def monitor_open_trades(cfg: dict):
     cfg,
     read_csv_rows,
     write_csv_rows,
