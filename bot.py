@@ -611,7 +611,7 @@ def monitor_open_trades(cfg: dict):
                     row["scalp_exit_utc"] = now_utc.isoformat()
                     row["scalp_pnl_pct"] = round(pnl_pct, 2)
 
-                        icon = "✅" if scalp_result == "WIN" else "❌"
+                    icon = "✅" if scalp_result == "WIN" else "❌"
 
                     send_telegram(
                         cfg,
