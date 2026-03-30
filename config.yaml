@@ -35,6 +35,15 @@ strategy:
   scalp_sl_pct: 0.12
   scalp_max_hold_seconds: 480
 
+  weak_sl_percent: 0.10
+  normal_sl_percent: 0.12
+  strong_sl_percent: 0.16
+
+  strong_edge_cents: 30
+  strong_move_abs: 12
+  strong_momentum_score: 80
+  strong_grace_period_seconds: 90
+
 risk:
   bankroll_usd: 1000
   min_order_usd: 15
