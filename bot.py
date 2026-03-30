@@ -574,14 +574,15 @@ def monitor_open_trades(cfg: dict):
             deadline_utc = datetime.fromisoformat(row["time_exit_deadline_utc"])
 
             midpoint = None
-if now_et < market_hour_end_et:
-    try:
-        state = resolve_current_market_state(cfg)
-        if state.slug == slug:
-            token = state.yes_token_id
-            midpoint = fetch_public_clob_midpoint(token)
-    except Exception as e:
-        midpoint = None
+            if now_et < market_hour_end_et:
+                try:
+                    state = resolve_current_market_state(cfg)
+                    if state.slug == slug:
+                        token = state.yes_token_id if action == "BUY UP" else state.no_token_id
+                        midpoint = fetch_public_clob_midpoint(token)
+                except Exception as e:
+                    midpoint = None
+            
 
             # ---- SCALP EXIT ----
             if row.get("scalp_status", "OPEN") == "OPEN":
