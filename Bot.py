@@ -823,16 +823,6 @@ def main():
 
     cfg = load_config(args.config)
 
-    # ONE-TIME RESET BLOCK. REMOVE AFTER ONE CLEAN DEPLOY.
-    for path in [
-        get_open_trades_file(cfg),
-        get_closed_trades_file(cfg),
-        get_summary_file(cfg),
-    ]:
-        if os.path.exists(path):
-            os.remove(path)
-            log(f"[RESET] deleted {path}")
-
     poll_seconds = get_poll_seconds(cfg)
 
     ensure_csv(get_open_trades_file(cfg), OPEN_FIELDS)
