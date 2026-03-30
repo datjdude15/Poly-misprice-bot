@@ -17,14 +17,14 @@ from market_resolver import resolve_current_market_state, fetch_public_clob_midp
 UTC = ZoneInfo("UTC")
 ET = ZoneInfo("America/New_York")
 
-OPEN_TRADES_FILE = "open_trades.csv"
-CLOSED_TRADES_FILE = "closed_trades.csv"
-SETTLED_TRADES_FILE = "settled_trades.csv"
-SUMMARY_FILE = "performance_summary.json"
+DEFAULT_OPEN_TRADES_FILE = "open_trades.csv"
+DEFAULT_CLOSED_TRADES_FILE = "closed_trades.csv"
+DEFAULT_SUMMARY_FILE = "performance_summary.json"
 
 OPEN_FIELDS = [
     "trade_id",
     "created_utc",
+    "entry_utc",
     "slug",
     "action",
     "grade",
@@ -38,79 +38,23 @@ OPEN_FIELDS = [
     "move",
     "btc_entry",
     "hour_open_btc",
-    "market_hour_end_et",
     "tp_price",
     "sl_price",
     "max_hold_seconds",
-    "status",
-]
-
-CLOSED_FIELDS = [
-    "trade_id",
-    "created_utc",
-    "closed_utc",
-    "slug",
-    "action",
-    "grade",
-    "tier",
-    "size_usd",
-    "entry_price",
-    "exit_price",
-    "edge_cents",
-    "prob_up",
-    "prob_down",
-    "momentum",
-    "move",
-    "btc_entry",
-    "hour_open_btc",
+    "time_exit_deadline_utc",
     "market_hour_end_et",
-    "tp_price",
-    "sl_price",
-    "max_hold_seconds",
-    "status",
-    "exit_reason",
-    "scalp_result",
+    "scalp_status",
+    "scalp_exit_reason",
+    "scalp_exit_price",
+    "scalp_exit_utc",
     "scalp_pnl_pct",
-    "scalp_pnl_usd",
-]
-
-SETTLED_FIELDS = [
-    "trade_id",
-    "slug",
-    "action",
-    "grade",
-    "entry_price",
-    "hour_open_btc",
+    "settle_status",
+    "settle_result",
     "settle_btc",
-    "settled_utc",
-    "settlement_result",
+    "settle_utc",
 ]
 
-SUMMARY_KEYS = [
-    "total_closed_scalps",
-    "scalp_wins",
-    "scalp_losses",
-    "scalp_timeouts",
-    "scalp_win_rate",
-    "total_settled",
-    "settlement_wins",
-    "settlement_losses",
-    "settlement_win_rate",
-    "tier1_scalp_total",
-    "tier1_scalp_wins",
-    "tier1_scalp_win_rate",
-    "tier2_scalp_total",
-    "tier2_scalp_wins",
-    "tier2_scalp_win_rate",
-    "buy_up_scalp_total",
-    "buy_up_scalp_wins",
-    "buy_up_scalp_win_rate",
-    "buy_down_scalp_total",
-    "buy_down_scalp_wins",
-    "buy_down_scalp_win_rate",
-    "total_scalp_pnl_usd",
-    "last_updated_utc",
-]
+CLOSED_FIELDS = OPEN_FIELDS.copy()
 
 
 def log(msg: str):
@@ -141,6 +85,22 @@ def get_risk(cfg: dict) -> dict:
     return cfg.get("risk", {})
 
 
+def get_logging_cfg(cfg: dict) -> dict:
+    return cfg.get("logging", {})
+
+
+def get_open_trades_file(cfg: dict) -> str:
+    return str(get_logging_cfg(cfg).get("open_trade_log_path", DEFAULT_OPEN_TRADES_FILE))
+
+
+def get_closed_trades_file(cfg: dict) -> str:
+    return str(get_logging_cfg(cfg).get("closed_trade_log_path", DEFAULT_CLOSED_TRADES_FILE))
+
+
+def get_summary_file(cfg: dict) -> str:
+    return str(get_logging_cfg(cfg).get("summary_log_path", DEFAULT_SUMMARY_FILE))
+
+
 def get_telegram_token(cfg: dict) -> str:
     return str(cfg.get("telegram_bot_token", "")).strip()
 
@@ -155,12 +115,6 @@ def clamp(x: float, lo: float, hi: float) -> float:
 
 def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
-
-
-def pct(n: int, d: int) -> float:
-    if d == 0:
-        return 0.0
-    return round(n / d, 4)
 
 
 def ensure_csv(path: str, fieldnames: list[str]):
@@ -179,81 +133,17 @@ def read_csv_rows(path: str) -> list[dict]:
 
 def write_csv_rows(path: str, fieldnames: list[str], rows: list[dict]):
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            cleaned = {k: row.get(k, "") for k in fieldnames}
-            writer.writerow(cleaned)
+            writer.writerow(row)
 
 
 def append_csv_row(path: str, fieldnames: list[str], row: dict):
     ensure_csv(path, fieldnames)
     with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        cleaned = {k: row.get(k, "") for k in fieldnames}
-        writer.writerow(cleaned)
-
-
-def write_summary(closed_rows: list[dict], settled_rows: list[dict]):
-    scalp_wins = sum(1 for r in closed_rows if r.get("scalp_result") == "WIN")
-    scalp_losses = sum(1 for r in closed_rows if r.get("scalp_result") == "LOSS")
-    scalp_timeouts = sum(1 for r in closed_rows if r.get("exit_reason") == "TIME_EXIT")
-    total_closed_scalps = len(closed_rows)
-
-    settlement_wins = sum(1 for r in settled_rows if r.get("settlement_result") == "WIN")
-    settlement_losses = sum(1 for r in settled_rows if r.get("settlement_result") == "LOSS")
-    total_settled = len(settled_rows)
-
-    tier1_scalp_total = sum(1 for r in closed_rows if r.get("grade") == "TIER1")
-    tier1_scalp_wins = sum(
-        1 for r in closed_rows if r.get("grade") == "TIER1" and r.get("scalp_result") == "WIN"
-    )
-
-    tier2_scalp_total = sum(1 for r in closed_rows if r.get("grade") == "TIER2")
-    tier2_scalp_wins = sum(
-        1 for r in closed_rows if r.get("grade") == "TIER2" and r.get("scalp_result") == "WIN"
-    )
-
-    buy_up_scalp_total = sum(1 for r in closed_rows if r.get("action") == "BUY UP")
-    buy_up_scalp_wins = sum(
-        1 for r in closed_rows if r.get("action") == "BUY UP" and r.get("scalp_result") == "WIN"
-    )
-
-    buy_down_scalp_total = sum(1 for r in closed_rows if r.get("action") == "BUY DOWN")
-    buy_down_scalp_wins = sum(
-        1 for r in closed_rows if r.get("action") == "BUY DOWN" and r.get("scalp_result") == "WIN"
-    )
-
-    total_scalp_pnl_usd = round(sum(float(r.get("scalp_pnl_usd", 0) or 0) for r in closed_rows), 2)
-
-    summary = {
-        "total_closed_scalps": total_closed_scalps,
-        "scalp_wins": scalp_wins,
-        "scalp_losses": scalp_losses,
-        "scalp_timeouts": scalp_timeouts,
-        "scalp_win_rate": pct(scalp_wins, total_closed_scalps),
-        "total_settled": total_settled,
-        "settlement_wins": settlement_wins,
-        "settlement_losses": settlement_losses,
-        "settlement_win_rate": pct(settlement_wins, total_settled),
-        "tier1_scalp_total": tier1_scalp_total,
-        "tier1_scalp_wins": tier1_scalp_wins,
-        "tier1_scalp_win_rate": pct(tier1_scalp_wins, tier1_scalp_total),
-        "tier2_scalp_total": tier2_scalp_total,
-        "tier2_scalp_wins": tier2_scalp_wins,
-        "tier2_scalp_win_rate": pct(tier2_scalp_wins, tier2_scalp_total),
-        "buy_up_scalp_total": buy_up_scalp_total,
-        "buy_up_scalp_wins": buy_up_scalp_wins,
-        "buy_up_scalp_win_rate": pct(buy_up_scalp_wins, buy_up_scalp_total),
-        "buy_down_scalp_total": buy_down_scalp_total,
-        "buy_down_scalp_wins": buy_down_scalp_wins,
-        "buy_down_scalp_win_rate": pct(buy_down_scalp_wins, buy_down_scalp_total),
-        "total_scalp_pnl_usd": total_scalp_pnl_usd,
-        "last_updated_utc": datetime.now(UTC).isoformat(),
-    }
-
-    with open(SUMMARY_FILE, "w") as f:
-        json.dump(summary, f, indent=2)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writerow(row)
 
 
 def probability_up(
@@ -278,8 +168,7 @@ def probability_up(
     mom_centered = (momentum_strength - 50.0) / 25.0
     raw += mom_centered * momentum_weight
 
-    prob = sigmoid(raw)
-    return clamp(prob, 0.01, 0.99)
+    return clamp(sigmoid(raw), 0.01, 0.99)
 
 
 def calc_minutes_left() -> float:
@@ -311,15 +200,6 @@ def fetch_btc_spot_from_coinbase() -> float:
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     return float(r.json()["data"]["amount"])
-
-
-def classify_grade(signal: str, edge_cents: float, prob_up: float, prob_down: float) -> str:
-    directional_prob = prob_up if signal == "BUY UP" else prob_down
-    if edge_cents >= 45 and directional_prob >= 0.62:
-        return "TIER1"
-    if edge_cents >= 25 and directional_prob >= 0.56:
-        return "TIER2"
-    return "WATCH"
 
 
 def build_signal(
@@ -423,9 +303,10 @@ def build_signal(
         result["reason"] = "FAILED_MOMENTUM_CONFIRMATION"
         return result
 
-    if edge_up_c >= min_edge_cents and edge_down_c >= min_edge_cents and not (up_prob_ok or down_prob_ok):
-        result["reason"] = "FAILED_PROBABILITY_FILTER"
-        return result
+    if edge_up_c >= min_edge_cents and edge_down_c >= min_edge_cents:
+        if not up_prob_ok and not down_prob_ok:
+            result["reason"] = "FAILED_PROBABILITY_FILTER"
+            return result
 
     if edge_up_c < min_edge_cents and edge_down_c < min_edge_cents:
         result["reason"] = "FAILED_MIN_EDGE"
@@ -453,6 +334,15 @@ def calc_order_size(signal: str, edge_cents: float, cfg: dict) -> tuple[str, flo
         size = min(max_order, max(min_order, bankroll * 0.025))
 
     return tier, round(size, 2)
+
+
+def classify_grade(signal: str, edge_cents: float, prob_up: float, prob_down: float) -> str:
+    directional_prob = prob_up if signal == "BUY UP" else prob_down
+    if edge_cents >= 45 and directional_prob >= 0.62:
+        return "TIER1"
+    if edge_cents >= 25 and directional_prob >= 0.55:
+        return "TIER2"
+    return "WATCH"
 
 
 def send_telegram(cfg: dict, text: str) -> bool:
@@ -489,27 +379,59 @@ def get_market_hour_end_et() -> datetime:
     return now_et.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
-def is_duplicate_open_trade(slug: str, action: str) -> bool:
-    rows = read_csv_rows(OPEN_TRADES_FILE)
-    for row in rows:
-        if row.get("slug") == slug and row.get("action") == action and row.get("status") == "OPEN":
-            return True
-    return False
-
-
 def get_tp_pct(cfg: dict) -> float:
-    return float(get_strategy(cfg).get("scalp_tp_pct", 0.20))
+    return float(get_strategy(cfg).get("tp_percent", 0.20))
 
 
 def get_sl_pct(cfg: dict) -> float:
-    return float(get_strategy(cfg).get("scalp_sl_pct", 0.12))
+    return float(get_strategy(cfg).get("sl_percent", 0.12))
 
 
 def get_max_hold_seconds(cfg: dict) -> int:
-    return int(get_strategy(cfg).get("scalp_max_hold_seconds", 480))
+    return int(get_strategy(cfg).get("max_hold_seconds", 480))
+
+
+def write_summary(cfg: dict):
+    closed_rows = read_csv_rows(get_closed_trades_file(cfg))
+
+    total = len(closed_rows)
+    scalp_wins = sum(1 for r in closed_rows if r.get("scalp_status") == "WIN")
+    scalp_losses = sum(1 for r in closed_rows if r.get("scalp_status") == "LOSS")
+    settle_wins = sum(1 for r in closed_rows if r.get("settle_result") == "WIN")
+    settle_losses = sum(1 for r in closed_rows if r.get("settle_result") == "LOSS")
+
+    summary = {
+        "total_closed_trades": total,
+        "scalp_wins": scalp_wins,
+        "scalp_losses": scalp_losses,
+        "scalp_win_rate": round((scalp_wins / total) if total else 0.0, 4),
+        "settle_wins": settle_wins,
+        "settle_losses": settle_losses,
+        "settle_win_rate": round((settle_wins / total) if total else 0.0, 4),
+        "last_updated_utc": datetime.now(UTC).isoformat(),
+    }
+
+    with open(get_summary_file(cfg), "w") as f:
+        json.dump(summary, f, indent=2)
+
+
+def trade_exists_for_slug_action(cfg: dict, slug: str, action: str) -> bool:
+    rows = read_csv_rows(get_open_trades_file(cfg))
+    for row in rows:
+        if row.get("slug") == slug and row.get("action") == action:
+            return True
+
+    closed_rows = read_csv_rows(get_closed_trades_file(cfg))
+    for row in closed_rows:
+        if row.get("slug") == slug and row.get("action") == action:
+            return True
+
+    return False
 
 
 def create_open_trade_row(
+    cfg: dict,
+    trade_id: str,
     market_state,
     signal: str,
     grade: str,
@@ -522,18 +444,21 @@ def create_open_trade_row(
     momentum: float,
     move: float,
     btc_price: float,
-    cfg: dict,
 ) -> dict:
     tp_pct = get_tp_pct(cfg)
     sl_pct = get_sl_pct(cfg)
     max_hold_seconds = get_max_hold_seconds(cfg)
 
-    tp_price = entry_price * (1.0 + tp_pct)
-    sl_price = entry_price * (1.0 - sl_pct)
+    tp_price = round(entry_price * (1.0 + tp_pct), 4)
+    sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
+
+    now_utc = datetime.now(UTC)
+    hour_end_et = get_market_hour_end_et()
 
     return {
-        "trade_id": f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}",
-        "created_utc": datetime.now(UTC).isoformat(),
+        "trade_id": trade_id,
+        "created_utc": now_utc.isoformat(),
+        "entry_utc": now_utc.isoformat(),
         "slug": market_state.slug,
         "action": signal,
         "grade": grade,
@@ -547,211 +472,154 @@ def create_open_trade_row(
         "move": round(move, 2),
         "btc_entry": round(btc_price, 2),
         "hour_open_btc": round(float(market_state.hour_open_btc), 2),
-        "market_hour_end_et": get_market_hour_end_et().isoformat(),
-        "tp_price": round(tp_price, 4),
-        "sl_price": round(sl_price, 4),
+        "tp_price": tp_price,
+        "sl_price": sl_price,
         "max_hold_seconds": max_hold_seconds,
-        "status": "OPEN",
+        "time_exit_deadline_utc": (now_utc + timedelta(seconds=max_hold_seconds)).isoformat(),
+        "market_hour_end_et": hour_end_et.isoformat(),
+        "scalp_status": "OPEN",
+        "scalp_exit_reason": "",
+        "scalp_exit_price": "",
+        "scalp_exit_utc": "",
+        "scalp_pnl_pct": "",
+        "settle_status": "OPEN",
+        "settle_result": "",
+        "settle_btc": "",
+        "settle_utc": "",
     }
 
 
-def close_scalp_trade(open_row: dict, exit_price: float, exit_reason: str):
-    created_utc = datetime.fromisoformat(open_row["created_utc"])
-    now_utc = datetime.now(UTC)
-
-    entry_price = float(open_row["entry_price"])
-    size_usd = float(open_row["size_usd"])
-
-    pnl_pct = (exit_price - entry_price) / max(entry_price, 0.0001)
-    pnl_usd = size_usd * pnl_pct
-
-    scalp_result = "WIN" if pnl_usd > 0 else "LOSS"
-    if abs(pnl_usd) < 0.0001 and exit_reason == "TIME_EXIT":
-        scalp_result = "LOSS"
-
-    closed_row = {
-        "trade_id": open_row["trade_id"],
-        "created_utc": open_row["created_utc"],
-        "closed_utc": now_utc.isoformat(),
-        "slug": open_row["slug"],
-        "action": open_row["action"],
-        "grade": open_row["grade"],
-        "tier": open_row["tier"],
-        "size_usd": open_row["size_usd"],
-        "entry_price": open_row["entry_price"],
-        "exit_price": round(exit_price, 4),
-        "edge_cents": open_row["edge_cents"],
-        "prob_up": open_row["prob_up"],
-        "prob_down": open_row["prob_down"],
-        "momentum": open_row["momentum"],
-        "move": open_row["move"],
-        "btc_entry": open_row["btc_entry"],
-        "hour_open_btc": open_row["hour_open_btc"],
-        "market_hour_end_et": open_row["market_hour_end_et"],
-        "tp_price": open_row["tp_price"],
-        "sl_price": open_row["sl_price"],
-        "max_hold_seconds": open_row["max_hold_seconds"],
-        "status": "CLOSED",
-        "exit_reason": exit_reason,
-        "scalp_result": scalp_result,
-        "scalp_pnl_pct": round(pnl_pct * 100.0, 2),
-        "scalp_pnl_usd": round(pnl_usd, 2),
-    }
-
-    append_csv_row(CLOSED_TRADES_FILE, CLOSED_FIELDS, closed_row)
-
-    open_rows = read_csv_rows(OPEN_TRADES_FILE)
-    remaining_rows = [r for r in open_rows if r.get("trade_id") != open_row["trade_id"]]
-    write_csv_rows(OPEN_TRADES_FILE, OPEN_FIELDS, remaining_rows)
-
-    return closed_row
-
-
-def settle_directional_result(closed_row: dict, settle_btc: float):
-    hour_open = float(closed_row["hour_open_btc"])
-    action = closed_row["action"]
-
-    settlement_result = "LOSS"
-    if action == "BUY UP" and settle_btc > hour_open:
-        settlement_result = "WIN"
-    elif action == "BUY DOWN" and settle_btc < hour_open:
-        settlement_result = "WIN"
-
-    settled_row = {
-        "trade_id": closed_row["trade_id"],
-        "slug": closed_row["slug"],
-        "action": closed_row["action"],
-        "grade": closed_row["grade"],
-        "entry_price": closed_row["entry_price"],
-        "hour_open_btc": closed_row["hour_open_btc"],
-        "settle_btc": round(settle_btc, 2),
-        "settled_utc": datetime.now(UTC).isoformat(),
-        "settlement_result": settlement_result,
-    }
-    append_csv_row(SETTLED_TRADES_FILE, SETTLED_FIELDS, settled_row)
-    return settled_row
+def close_trade_record(cfg: dict, trade_id: str, updated_row: dict):
+    open_rows = read_csv_rows(get_open_trades_file(cfg))
+    remaining_rows = [r for r in open_rows if r.get("trade_id") != trade_id]
+    write_csv_rows(get_open_trades_file(cfg), OPEN_FIELDS, remaining_rows)
+    append_csv_row(get_closed_trades_file(cfg), CLOSED_FIELDS, updated_row)
+    write_summary(cfg)
 
 
 def monitor_open_trades(cfg: dict):
-    ensure_csv(OPEN_TRADES_FILE, OPEN_FIELDS)
-    ensure_csv(CLOSED_TRADES_FILE, CLOSED_FIELDS)
-    ensure_csv(SETTLED_TRADES_FILE, SETTLED_FIELDS)
-
-    open_rows = read_csv_rows(OPEN_TRADES_FILE)
+    open_rows = read_csv_rows(get_open_trades_file(cfg))
     if not open_rows:
         return
 
-    closed_rows = read_csv_rows(CLOSED_TRADES_FILE)
-    settled_rows = read_csv_rows(SETTLED_TRADES_FILE)
-
-    btc_spot = fetch_btc_spot_from_coinbase()
     now_utc = datetime.now(UTC)
-    now_ts = time.time()
+    now_et = datetime.now(ET)
+    closed_rows = read_csv_rows(get_closed_trades_file(cfg))
+    changed = False
 
     for row in list(open_rows):
         try:
-            slug = row["slug"]
             action = row["action"]
-            created_dt = datetime.fromisoformat(row["created_utc"])
-            age_seconds = (now_utc - created_dt).total_seconds()
+            slug = row["slug"]
 
-            try:
-                if action == "BUY UP":
-                    live_mid = fetch_public_clob_midpoint(resolve_current_market_state().yes_token_id)
-                else:
-                    live_mid = fetch_public_clob_midpoint(resolve_current_market_state().no_token_id)
-            except Exception:
-                live_mid = None
-
-            if live_mid is None:
-                continue
-
+            entry_price = float(row["entry_price"])
             tp_price = float(row["tp_price"])
             sl_price = float(row["sl_price"])
-            max_hold_seconds = int(float(row["max_hold_seconds"]))
+            hour_open_btc = float(row["hour_open_btc"])
 
-            exit_reason = None
-            exit_price = None
-
-            if live_mid >= tp_price:
-                exit_reason = "TP"
-                exit_price = live_mid
-            elif live_mid <= sl_price:
-                exit_reason = "SL"
-                exit_price = live_mid
-            elif age_seconds >= max_hold_seconds:
-                exit_reason = "TIME_EXIT"
-                exit_price = live_mid
-
-            if exit_reason is None:
-                continue
-
-            closed_row = close_scalp_trade(row, float(exit_price), exit_reason)
-
-            send_telegram(
-                cfg,
-                f"{'✅' if closed_row['scalp_result'] == 'WIN' else '❌'} TRADE CLOSED\n"
-                f"Mode: {get_mode(cfg).upper()}\n"
-                f"Action: {closed_row['action']}\n"
-                f"Grade: {closed_row['grade']}\n"
-                f"Slug: {closed_row['slug']}\n"
-                f"Entry: {float(closed_row['entry_price']):.3f}\n"
-                f"Exit: {float(closed_row['exit_price']):.3f}\n"
-                f"Reason: {closed_row['exit_reason']}\n"
-                f"PnL: {closed_row['scalp_pnl_pct']}%\n"
-                f"PnL USD: ${closed_row['scalp_pnl_usd']}"
-            )
-
-            log(
-                f"[CLOSE] slug={closed_row['slug']} "
-                f"action={closed_row['action']} "
-                f"reason={closed_row['exit_reason']} "
-                f"result={closed_row['scalp_result']} "
-                f"pnl_pct={closed_row['scalp_pnl_pct']}"
-            )
-
-        except Exception as e:
-            log(f"[MONITOR] error: {e}")
-
-    # settlement tracking for already closed trades once their market hour has ended
-    closed_rows = read_csv_rows(CLOSED_TRADES_FILE)
-    settled_rows = read_csv_rows(SETTLED_TRADES_FILE)
-    settled_trade_ids = {r["trade_id"] for r in settled_rows}
-
-    for row in closed_rows:
-        try:
-            if row["trade_id"] in settled_trade_ids:
-                continue
+            scalp_status = row.get("scalp_status", "OPEN")
+            settle_status = row.get("settle_status", "OPEN")
 
             market_hour_end_et = datetime.fromisoformat(row["market_hour_end_et"])
-            if datetime.now(ET) < market_hour_end_et + timedelta(seconds=15):
-                continue
+            time_exit_deadline_utc = datetime.fromisoformat(row["time_exit_deadline_utc"])
 
-            settled_row = settle_directional_result(row, btc_spot)
+            same_hour_active = now_et < market_hour_end_et
 
-            send_telegram(
-                cfg,
-                f"{'✅' if settled_row['settlement_result'] == 'WIN' else '❌'} SETTLEMENT RESULT\n"
-                f"Mode: {get_mode(cfg).upper()}\n"
-                f"Action: {settled_row['action']}\n"
-                f"Grade: {settled_row['grade']}\n"
-                f"Slug: {settled_row['slug']}\n"
-                f"Hour Open BTC: {float(settled_row['hour_open_btc']):.2f}\n"
-                f"Settle BTC: {float(settled_row['settle_btc']):.2f}\n"
-                f"Settlement: {settled_row['settlement_result']}"
-            )
+            midpoint = None
+            if same_hour_active:
+                try:
+                    current_state = resolve_current_market_state()
+                    if current_state.slug == slug:
+                        if action == "BUY UP":
+                            midpoint = fetch_public_clob_midpoint(current_state.yes_token_id)
+                        else:
+                            midpoint = fetch_public_clob_midpoint(current_state.no_token_id)
+                except Exception:
+                    midpoint = None
 
-            log(
-                f"[SETTLE] slug={settled_row['slug']} "
-                f"action={settled_row['action']} "
-                f"settlement={settled_row['settlement_result']}"
-            )
+            if scalp_status == "OPEN":
+                exit_reason = None
+                exit_price = None
+
+                if midpoint is not None:
+                    if midpoint >= tp_price:
+                        exit_reason = "TP"
+                        exit_price = midpoint
+                    elif midpoint <= sl_price:
+                        exit_reason = "SL"
+                        exit_price = midpoint
+
+                if exit_reason is None and now_utc >= time_exit_deadline_utc:
+                    if midpoint is not None:
+                        exit_reason = "TIME_EXIT"
+                        exit_price = midpoint
+
+                if exit_reason is not None and exit_price is not None:
+                    pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+                    scalp_result = "WIN" if pnl_pct > 0 else "LOSS"
+
+                    row["scalp_status"] = scalp_result
+                    row["scalp_exit_reason"] = exit_reason
+                    row["scalp_exit_price"] = round(exit_price, 4)
+                    row["scalp_exit_utc"] = now_utc.isoformat()
+                    row["scalp_pnl_pct"] = round(pnl_pct, 2)
+
+                    send_telegram(
+                        cfg,
+                        (
+                            f"{'✅' if scalp_result == 'WIN' else '❌'} TRADE CLOSED\n"
+                            f"Mode: {get_mode(cfg).upper()}\n"
+                            f"Action: {action}\n"
+                            f"Grade: {row['grade']}\n"
+                            f"Slug: {slug}\n"
+                            f"Entry: {entry_price:.3f}\n"
+                            f"Exit: {float(row['scalp_exit_price']):.3f}\n"
+                            f"Reason: {exit_reason}\n"
+                            f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
+                        ),
+                    )
+                    changed = True
+
+            if settle_status == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
+                settle_btc = fetch_btc_spot_from_coinbase()
+
+                market_went_up = settle_btc > hour_open_btc
+                market_went_down = settle_btc < hour_open_btc
+
+                if action == "BUY UP":
+                    settle_result = "WIN" if market_went_up else "LOSS"
+                else:
+                    settle_result = "WIN" if market_went_down else "LOSS"
+
+                row["settle_status"] = "CLOSED"
+                row["settle_result"] = settle_result
+                row["settle_btc"] = round(settle_btc, 2)
+                row["settle_utc"] = now_utc.isoformat()
+
+                send_telegram(
+                    cfg,
+                    (
+                        f"{'✅' if settle_result == 'WIN' else '❌'} FINAL SETTLE RESULT\n"
+                        f"Mode: {get_mode(cfg).upper()}\n"
+                        f"Action: {action}\n"
+                        f"Grade: {row['grade']}\n"
+                        f"Slug: {slug}\n"
+                        f"Hour Open BTC: {hour_open_btc:.2f}\n"
+                        f"Settle BTC: {settle_btc:.2f}\n"
+                        f"Result: {settle_result}"
+                    ),
+                )
+                changed = True
+
+            if row.get("scalp_status") != "OPEN" and row.get("settle_status") == "CLOSED":
+                close_trade_record(cfg, row["trade_id"], row)
+                changed = True
+
         except Exception as e:
-            log(f"[SETTLE] error: {e}")
+            log(f"[TRACKER] error monitoring trade: {e}")
 
-    closed_rows = read_csv_rows(CLOSED_TRADES_FILE)
-    settled_rows = read_csv_rows(SETTLED_TRADES_FILE)
-    write_summary(closed_rows, settled_rows)
+    if changed:
+        write_summary(cfg)
 
 
 def maybe_emit_trade(
@@ -780,8 +648,8 @@ def maybe_emit_trade(
             f"[PASS] slug={market_state.slug} "
             f"reason={signal_data['reason']} "
             f"move={signal_data['abs_move']} "
-            f"prob_up={signal_data['prob_up']:.3f} "
-            f"prob_down={signal_data['prob_down']:.3f} "
+            f"prob_up={signal_data['prob_up']:.4f} "
+            f"prob_down={signal_data['prob_down']:.4f} "
             f"edge_up={signal_data['edge_up_c']}c "
             f"edge_down={signal_data['edge_down_c']}c "
             f"mom={signal_data['momentum_strength']}"
@@ -823,8 +691,8 @@ def maybe_emit_trade(
                 send_telegram(cfg, msg)
         return
 
-    if is_duplicate_open_trade(market_state.slug, signal):
-        log(f"[TRADE] skipped duplicate open trade for {market_state.slug} {signal}")
+    if trade_exists_for_slug_action(cfg, market_state.slug, signal):
+        log(f"[TRADE] skipped duplicate for slug={market_state.slug} action={signal}")
         return
 
     edge_cents = signal_data["edge_up_c"] if signal == "BUY UP" else signal_data["edge_down_c"]
@@ -832,23 +700,24 @@ def maybe_emit_trade(
     tier, size = calc_order_size(signal, edge_cents, cfg)
     grade = classify_grade(signal, edge_cents, float(signal_data["prob_up"]), float(signal_data["prob_down"]))
 
-    open_row = create_open_trade_row(
+    trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
+    trade_row = create_open_trade_row(
+        cfg=cfg,
+        trade_id=trade_id,
         market_state=market_state,
         signal=signal,
         grade=grade,
         tier=tier,
         size=size,
-        entry_price=float(entry_price),
-        edge_cents=float(edge_cents),
+        entry_price=entry_price,
+        edge_cents=edge_cents,
         prob_up=float(signal_data["prob_up"]),
         prob_down=float(signal_data["prob_down"]),
         momentum=float(signal_data["momentum_strength"]),
         move=float(signal_data["abs_move"]),
         btc_price=float(btc_price),
-        cfg=cfg,
     )
-
-    append_csv_row(OPEN_TRADES_FILE, OPEN_FIELDS, open_row)
+    append_csv_row(get_open_trades_file(cfg), OPEN_FIELDS, trade_row)
 
     log(
         f"[TRADE] mode={mode} "
@@ -895,9 +764,8 @@ def main():
     cfg = load_config(args.config)
     poll_seconds = get_poll_seconds(cfg)
 
-    ensure_csv(OPEN_TRADES_FILE, OPEN_FIELDS)
-    ensure_csv(CLOSED_TRADES_FILE, CLOSED_FIELDS)
-    ensure_csv(SETTLED_TRADES_FILE, SETTLED_FIELDS)
+    ensure_csv(get_open_trades_file(cfg), OPEN_FIELDS)
+    ensure_csv(get_closed_trades_file(cfg), CLOSED_FIELDS)
 
     log("🚀 BOT STARTING")
     log(f"Loading config from {args.config}")
@@ -920,7 +788,7 @@ def main():
     current_slug = None
     alert_cooldowns: dict[str, float] = {}
     last_heartbeat_ts = 0.0
-    last_monitor_ts = 0.0
+    last_tracker_ts = 0.0
 
     while True:
         try:
@@ -930,9 +798,9 @@ def main():
                 log("Heartbeat... bot running")
                 last_heartbeat_ts = now_ts
 
-            if now_ts - last_monitor_ts >= 10:
+            if now_ts - last_tracker_ts >= 5:
                 monitor_open_trades(cfg)
-                last_monitor_ts = now_ts
+                last_tracker_ts = now_ts
 
             market_state = resolve_current_market_state()
             current_slug = market_state.slug
