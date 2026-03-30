@@ -539,25 +539,7 @@ def safe_close_trade_record(read_csv_rows, write_csv_rows, append_csv_row,
     return True
 
 
-def monitor_open_trades(cfg: dict):
-    cfg,
-    read_csv_rows,
-    write_csv_rows,
-    append_csv_row,
-    get_open_trades_file,
-    get_closed_trades_file,
-    OPEN_FIELDS,
-    CLOSED_FIELDS,
-    resolve_current_market_state,
-    fetch_public_clob_midpoint,
-    fetch_btc_spot_from_coinbase,
-    send_telegram,
-    get_mode,
-):
-    """
-    Drop-in replacement for your monitor_open_trades().
-    Prevents duplicate TP/SL spam.
-    """
+def monitor_open_trades(cfg: dict):"
     open_path = get_open_trades_file(cfg)
     closed_path = get_closed_trades_file(cfg)
 
@@ -628,9 +610,11 @@ def monitor_open_trades(cfg: dict):
                     row["scalp_exit_utc"] = now_utc.isoformat()
                     row["scalp_pnl_pct"] = round(pnl_pct, 2)
 
+                                        icon = "✅" if scalp_result == "WIN" else "❌"
+
                     send_telegram(
                         cfg,
-                        f"{'✅' if scalp_result == 'WIN' else '❌'} TRADE CLOSED\n"
+                        f"{icon} TRADE CLOSED\n"
                         f"Mode: {get_mode(cfg).upper()}\n"
                         f"Action: {action}\n"
                         f"Grade: {row['grade']}\n"
@@ -646,11 +630,6 @@ def monitor_open_trades(cfg: dict):
             if row.get("settle_status", "OPEN") == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
                 settle_btc = fetch_btc_spot_from_coinbase()
                 went_up = settle_btc > hour_open_btc
-
-                if action == "BUY UP":
-                    settle_result = "WIN" if went_up else "LOSS"
-                else:
-                    settle_result = "WIN" if not went_up else "LOSS"
 
                 row["settle_status"] = "CLOSED"
                 row["settle_result"] = settle_result
