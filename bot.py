@@ -580,7 +580,7 @@ def monitor_open_trades(cfg: dict):
                     send_telegram(
                         cfg,
                         (
-                            f"{'✅' if scalp_result == 'WIN' else '❌'} TRADE CLOSED
+                           header = "✅ TRADE CLOSED" if scalp_result == "WIN" else "❌ TRADE CLOSED" 
 "
                             f"Mode: {get_mode(cfg).upper()}
 "
