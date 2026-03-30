@@ -569,36 +569,30 @@ def monitor_open_trades(cfg: dict):
                         continue
 
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
-                    scalp_result = "WIN" if pnl_pct > 0 else "LOSS"
+scalp_result = "WIN" if pnl_pct > 0 else "LOSS"
 
-                    row["scalp_status"] = scalp_result
-                    row["scalp_exit_reason"] = exit_reason
-                    row["scalp_exit_price"] = round(exit_price, 4)
-                    row["scalp_exit_utc"] = now_utc.isoformat()
-                    row["scalp_pnl_pct"] = round(pnl_pct, 2)
+row["scalp_status"] = scalp_result
+row["scalp_exit_reason"] = exit_reason
+row["scalp_exit_price"] = round(exit_price, 4)
+row["scalp_exit_utc"] = now_utc.isoformat()
+row["scalp_pnl_pct"] = round(pnl_pct, 2)
 
-                    send_telegram(
-                        cfg,
-                        (
-                           header = "✅ TRADE CLOSED" if scalp_result == "WIN" else "❌ TRADE CLOSED" 
-"
-                            f"Mode: {get_mode(cfg).upper()}
-"
-                            f"Action: {action}
-"
-                            f"Grade: {row['grade']}
-"
-                            f"Slug: {slug}
-"
-                            f"Entry: {entry_price:.3f}
-"
-                            f"Exit: {float(row['scalp_exit_price']):.3f}
-"
-                            f"Reason: {exit_reason}
-"
-                            f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
-                        ),
-                    )
+header = "✅ TRADE CLOSED" if scalp_result == "WIN" else "❌ TRADE CLOSED"
+
+send_telegram(
+    cfg,
+    (
+        f"{header}\n"
+        f"Mode: {get_mode(cfg).upper()}\n"
+        f"Action: {action}\n"
+        f"Grade: {row['grade']}\n"
+        f"Slug: {slug}\n"
+        f"Entry: {entry_price:.3f}\n"
+        f"Exit: {float(row['scalp_exit_price']):.3f}\n"
+        f"Reason: {exit_reason}\n"
+        f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
+    ),
+)
 
                     if row.get("settle_status") == "CLOSED":
                         close_trade_record(cfg, trade_id, row)
