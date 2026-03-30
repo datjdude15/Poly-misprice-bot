@@ -574,7 +574,7 @@ def monitor_open_trades(cfg: dict):
             deadline_utc = datetime.fromisoformat(row["time_exit_deadline_utc"])
 
             midpoint = None
-    if now_et < market_hour_end_et:
+if now_et < market_hour_end_et:
     try:
         state = resolve_current_market_state(cfg)
         if state.slug == slug:
