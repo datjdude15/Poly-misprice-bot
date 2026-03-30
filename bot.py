@@ -502,13 +502,6 @@ def close_trade_record(cfg: dict, trade_id: str, updated_row: dict):
     write_summary(cfg)
 
 
-import csv
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-
-UTC = ZoneInfo("UTC")
-ET = ZoneInfo("America/New_York")
-
 def dedupe_open_rows(rows):
     """Keep only one OPEN row per unique trade_id."""
     seen = set()
