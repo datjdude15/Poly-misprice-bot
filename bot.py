@@ -761,7 +761,21 @@ def maybe_emit_trade(
     entry_price = yes_price if signal == "BUY UP" else no_price
     tier, size = calc_order_size(signal, edge_cents, cfg)
     grade = classify_grade(signal, edge_cents, float(signal_data["prob_up"]), float(signal_data["prob_down"]))
+open_rows = read_csv_rows(get_open_trades_file(cfg))
+closed_rows = read_csv_rows(get_closed_trades_file(cfg))
 
+if should_block_same_slug_reentry(
+    open_rows=open_rows,
+    closed_rows=closed_rows,
+    slug=market_state.slug,
+    action=signal,
+    prob_up=float(signal_data["prob_up"]),
+    prob_down=float(signal_data["prob_down"]),
+    move_abs=float(signal_data["abs_move"]),
+    cfg=cfg,
+):
+    log(f"[TRADE] blocked same-slug reentry for slug={market_state.slug} action={signal}")
+    return
     trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
     trade_row = create_open_trade_row(
         cfg=cfg,
