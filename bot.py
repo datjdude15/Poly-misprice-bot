@@ -461,12 +461,14 @@ def create_open_trade_row(
 ) -> dict:
     tp_pct = get_tp_pct(cfg)
     minutes_left = calc_minutes_left()
-    sl_pct = get_dynamic_sl_percent(
-    edge_cents=edge_cents,
-    move_abs=move,
-    momentum=momentum,
-    entry_price=entry_price,
-    minutes_left=minutes_left,
+        sl_pct = get_dynamic_sl_percent(
+        edge_cents=edge_cents,
+        move_abs=move,
+        momentum=momentum,
+        entry_price=entry_price,
+        minutes_left=minutes_left,
+        cfg=cfg,
+    )
         "max_hold_seconds": max_hold_seconds,
         "highest_midpoint_seen": round(entry_price, 4),
         "ladder_stop_price": "",
