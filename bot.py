@@ -610,7 +610,7 @@ def monitor_open_trades(cfg: dict):
             
 
             # ---- SCALP EXIT ----
-            if row.get("scalp_status", "OPEN") == "OPEN":
+                        if row.get("scalp_status", "OPEN") == "OPEN":
                 exit_reason = None
                 exit_price = None
 
@@ -620,15 +620,41 @@ def monitor_open_trades(cfg: dict):
                 strong_trade = is_strong_trade_row(row, cfg)
                 grace_seconds = get_strong_grace_period_seconds(cfg)
 
+                minutes_left = max(0.0, (market_hour_end_et - now_et).total_seconds() / 60.0)
+
+                ladder_stop_price = None
+                if midpoint is not None:
+                    ladder_stop_price, ladder_updates = compute_ladder_exit_price(
+                        entry_price=entry_price,
+                        midpoint=midpoint,
+                        minutes_left=minutes_left,
+                        row=row,
+                        cfg=cfg,
+                    )
+                    for k, v in ladder_updates.items():
+                        row[k] = v
+
+                active_stop_price = sl_price
+                row["exit_mode"] = "STATIC"
+
+                if ladder_stop_price is not None:
+                    active_stop_price = max(sl_price, ladder_stop_price)
+                    row["exit_mode"] = "LADDER"
+
                 if midpoint is not None:
                     if midpoint >= tp_price:
-                        exit_reason = "TP"
-                        exit_price = midpoint
-                    elif midpoint <= sl_price:
-                        if strong_trade and seconds_open < grace_seconds:
+                        # Do not auto-exit immediately if ladder has activated.
+                        # Let runner logic work once profit has matured.
+                        if row["exit_mode"] == "LADDER":
                             pass
                         else:
-                            exit_reason = "SL"
+                            exit_reason = "TP"
+                            exit_price = midpoint
+                    elif midpoint <= active_stop_price:
+                        if strong_trade and seconds_open < grace_seconds and active_stop_price == sl_price:
+                            pass
+                        else:
+                            exit_reason = "LADDER_STOP" if row["exit_mode"] == "LADDER" else "SL"
                             exit_price = midpoint
 
                 if exit_reason is None:
@@ -636,7 +662,7 @@ def monitor_open_trades(cfg: dict):
                         midpoint=midpoint,
                         entry_price=entry_price,
                         tp_price=tp_price,
-                        minutes_left=max(0.0, (market_hour_end_et - now_et).total_seconds() / 60.0),
+                        minutes_left=minutes_left,
                         action=action,
                         hour_open_btc=hour_open_btc,
                         current_btc=fetch_btc_spot_from_coinbase(),
@@ -671,6 +697,7 @@ def monitor_open_trades(cfg: dict):
                         f"Entry: {entry_price:.3f}\n"
                         f"Exit: {float(row['scalp_exit_price']):.3f}\n"
                         f"Reason: {exit_reason}\n"
+                        f"Exit Mode: {row.get('exit_mode', 'STATIC')}\n"
                         f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
                     )
                     changed = True
