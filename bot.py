@@ -467,12 +467,11 @@ def create_open_trade_row(
     momentum=momentum,
     entry_price=entry_price,
     minutes_left=minutes_left,
-    cfg=cfg,
-)
-        max_hold_seconds = get_max_hold_seconds(cfg)
-        highest_midpoint_seen": round(entry_price, 4),
-        ladder_stop_price": "",
-        exit_mode": "STATIC",
+        "max_hold_seconds": max_hold_seconds,
+        "highest_midpoint_seen": round(entry_price, 4),
+        "ladder_stop_price": "",
+        "exit_mode": "STATIC",
+        "time_exit_deadline_utc": (now_utc + timedelta(seconds=max_hold_seconds)).isoformat(),
     tp_price = round(entry_price * (1.0 + tp_pct), 4)
     sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
 
