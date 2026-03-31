@@ -26,9 +26,9 @@ from trade_logic import (
 UTC = ZoneInfo("UTC")
 ET = ZoneInfo("America/New_York")
 
-DEFAULT_OPEN_TRADES_FILE = "open_trades.csv"
-DEFAULT_CLOSED_TRADES_FILE = "closed_trades.csv"
-DEFAULT_SUMMARY_FILE = "performance_summary.json"
+DEFAULT_OPEN_TRADES_FILE = "/app/data/open_trades.csv"
+DEFAULT_CLOSED_TRADES_FILE = "/app/data/closed_trades.csv"
+DEFAULT_SUMMARY_FILE = "/app/data/performance_summary.json"
 
 OPEN_FIELDS = [
     "trade_id",
