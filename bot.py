@@ -19,6 +19,7 @@ from trade_logic import (
     is_strong_trade_row,
     should_block_same_slug_reentry,
     should_force_time_pressure_exit,
+    compute_ladder_exit_price
 )
 
 
