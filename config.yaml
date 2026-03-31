@@ -51,6 +51,14 @@ strategy:
   time_pressure_btc_distance: 120.0
   time_pressure_min_profit: 0.06
 
+  ladder_stage1_trigger: 0.12
+  ladder_stage1_lock: 0.02
+
+  ladder_stage2_trigger: 0.20
+  ladder_trail_normal: 0.08
+  ladder_trail_tight: 0.05
+  ladder_tight_minutes_left: 2.0
+
 risk:
   bankroll_usd: 1000
   min_order_usd: 15
