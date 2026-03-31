@@ -953,7 +953,10 @@ def main():
                 last_tracker_ts = now_ts
 
             market_state = resolve_current_market_state()
-            current_slug = market_state.slug
+            
+            if current_slug != market_state.slug:
+                price_history = []
+                current_slug = market_state.slug
 
             btc_price = fetch_btc_spot_from_coinbase()
             yes_price = fetch_public_clob_midpoint(market_state.yes_token_id)
