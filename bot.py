@@ -898,7 +898,7 @@ def main():
     cfg = load_config(args.config)
     poll_seconds = get_poll_seconds(cfg)
 
-        log("=== LAST 60 CLOSED TRADES ===")
+    log("=== LAST 60 CLOSED TRADES ===")
     closed_rows = read_csv_rows(get_closed_trades_file(cfg))
 
     for row in closed_rows[-60:]:
