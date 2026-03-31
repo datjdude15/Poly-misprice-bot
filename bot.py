@@ -253,7 +253,11 @@ def build_signal(
         "momentum_strength": round(momentum_strength, 1),
         "abs_move": round(abs_move, 2),
     }
-
+    
+    if abs_move < 8:
+        result["reason"] = "FAILED_MIN_REAL_MOVE"
+        return result
+    
     if minutes_left < no_trade_min_minutes_left or minutes_left > no_trade_max_minutes_left:
         result["reason"] = "FAILED_NO_TRADE_WINDOW"
         return result
