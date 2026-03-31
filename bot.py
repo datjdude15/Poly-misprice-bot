@@ -763,6 +763,7 @@ def maybe_emit_trade(
     grade = classify_grade(signal, edge_cents, float(signal_data["prob_up"]), float(signal_data["prob_down"]))
 open_rows = read_csv_rows(get_open_trades_file(cfg))
 closed_rows = read_csv_rows(get_closed_trades_file(cfg)) 
+   
     if should_block_same_slug_reentry(
         open_rows=open_rows,
         closed_rows=closed_rows,
