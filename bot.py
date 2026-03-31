@@ -901,7 +901,7 @@ def main():
 log("=== LAST 60 CLOSED TRADES ===")
 closed_rows = read_csv_rows(get_closed_trades_file(cfg))
 
-for row in closed_rows[-60:]:
+    for row in closed_rows[-60:]:
     log(
         f"[CLOSED] {row.get('entry_utc')} | "
         f"{row.get('action')} | "
