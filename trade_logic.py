@@ -149,3 +149,76 @@ def should_force_time_pressure_exit(
         return True, "TIME_PRESSURE_EXIT"
 
     return False, None
+
+
+def get_exit_ladder_settings(cfg: dict) -> dict:
+    strat = cfg.get("strategy", {})
+    return {
+        "stage1_trigger": float(strat.get("ladder_stage1_trigger", 0.12)),   # +12%
+        "stage1_lock": float(strat.get("ladder_stage1_lock", 0.02)),         # lock +2%
+
+        "stage2_trigger": float(strat.get("ladder_stage2_trigger", 0.20)),   # +20%
+        "trail_normal": float(strat.get("ladder_trail_normal", 0.08)),       # 8% below high
+        "trail_tight": float(strat.get("ladder_trail_tight", 0.05)),         # 5% below high
+        "tight_minutes_left": float(strat.get("ladder_tight_minutes_left", 2.0)),
+    }
+
+
+def compute_ladder_exit_price(
+    entry_price: float,
+    midpoint: float | None,
+    minutes_left: float,
+    row: dict,
+    cfg: dict,
+) -> tuple[float | None, dict]:
+    """
+    Returns:
+      ladder_stop_price: dynamic stop based on profit ladder
+      updates: fields to persist back into row
+    """
+    if midpoint is None:
+        return None, {}
+
+    settings = get_exit_ladder_settings(cfg)
+
+    stage1_trigger = settings["stage1_trigger"]
+    stage1_lock = settings["stage1_lock"]
+    stage2_trigger = settings["stage2_trigger"]
+    trail_normal = settings["trail_normal"]
+    trail_tight = settings["trail_tight"]
+    tight_minutes_left = settings["tight_minutes_left"]
+
+    highest_seen = float(row.get("highest_midpoint_seen") or 0)
+    if highest_seen <= 0:
+        highest_seen = entry_price
+
+    if midpoint > highest_seen:
+        highest_seen = midpoint
+
+    pnl_now = (midpoint - entry_price) / entry_price
+    pnl_high = (highest_seen - entry_price) / entry_price
+
+    updates = {
+        "highest_midpoint_seen": round(highest_seen, 4),
+    }
+
+    ladder_stop_price = None
+
+    # Stage 1: once trade is up enough, stop becomes breakeven + small gain
+    if pnl_high >= stage1_trigger:
+        stage1_floor = entry_price * (1.0 + stage1_lock)
+        ladder_stop_price = stage1_floor
+
+    # Stage 2: once trade is up big enough, trail under peak
+    if pnl_high >= stage2_trigger:
+        trail_pct = trail_tight if minutes_left <= tight_minutes_left else trail_normal
+        trailing_floor = highest_seen * (1.0 - trail_pct)
+        if ladder_stop_price is None:
+            ladder_stop_price = trailing_floor
+        else:
+            ladder_stop_price = max(ladder_stop_price, trailing_floor)
+
+    if ladder_stop_price is not None:
+        updates["ladder_stop_price"] = round(ladder_stop_price, 4)
+
+    return ladder_stop_price, updates
