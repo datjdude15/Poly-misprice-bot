@@ -455,12 +455,20 @@ def create_open_trade_row(
     move: float,
     btc_price: float,
 ) -> dict:
-    tp_pct = get_tp_pct(cfg)
-    sl_pct = get_sl_pct(cfg)
-    max_hold_seconds = get_max_hold_seconds(cfg)
+tp_pct = get_tp_pct(cfg)
+minutes_left = calc_minutes_left()
+sl_pct = get_dynamic_sl_percent(
+    edge_cents=edge_cents,
+    move_abs=move,
+    momentum=momentum,
+    entry_price=entry_price,
+    minutes_left=minutes_left,
+    cfg=cfg,
+)
+max_hold_seconds = get_max_hold_seconds(cfg)
 
-    tp_price = round(entry_price * (1.0 + tp_pct), 4)
-    sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
+tp_price = round(entry_price * (1.0 + tp_pct), 4)
+sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
 
     now_utc = datetime.now(UTC)
     hour_end_et = get_market_hour_end_et()
