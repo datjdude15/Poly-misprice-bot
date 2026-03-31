@@ -476,7 +476,8 @@ def create_open_trade_row(
     sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
 
     now_utc = datetime.now(UTC)
-    hour_end_et = get_market_hour_end_et()4)
+    hour_end_et = get_market_hour_end_et()
+    
 
     now_utc = datetime.now(UTC)
     hour_end_et = get_market_hour_end_et()
