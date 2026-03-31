@@ -12,6 +12,14 @@ import requests
 import yaml
 
 from market_resolver import resolve_current_market_state, fetch_public_clob_midpoint
+from trade_logic import (
+    classify_trade_strength,
+    get_dynamic_sl_percent,
+    get_strong_grace_period_seconds,
+    is_strong_trade_row,
+    should_block_same_slug_reentry,
+    should_force_time_pressure_exit,
+)
 
 
 UTC = ZoneInfo("UTC")
