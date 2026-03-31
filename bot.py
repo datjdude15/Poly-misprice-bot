@@ -455,6 +455,7 @@ def create_open_trade_row(
     move: float,
     btc_price: float,
 ) -> dict:
+
 tp_pct = get_tp_pct(cfg)
 minutes_left = calc_minutes_left()
 sl_pct = get_dynamic_sl_percent(
