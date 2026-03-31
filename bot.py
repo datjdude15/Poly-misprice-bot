@@ -605,15 +605,39 @@ def monitor_open_trades(cfg: dict):
                 exit_reason = None
                 exit_price = None
 
+                entry_utc_dt = datetime.fromisoformat(row["entry_utc"])
+                seconds_open = (now_utc - entry_utc_dt).total_seconds()
+
+                strong_trade = is_strong_trade_row(row, cfg)
+                grace_seconds = get_strong_grace_period_seconds(cfg)
+
                 if midpoint is not None:
                     if midpoint >= tp_price:
                         exit_reason = "TP"
                         exit_price = midpoint
                     elif midpoint <= sl_price:
-                        exit_reason = "SL"
+                        if strong_trade and seconds_open < grace_seconds:
+                            pass
+                        else:
+                            exit_reason = "SL"
+                            exit_price = midpoint
+
+                if exit_reason is None:
+                    force_exit, force_reason = should_force_time_pressure_exit(
+                        midpoint=midpoint,
+                        entry_price=entry_price,
+                        tp_price=tp_price,
+                        minutes_left=max(0.0, (market_hour_end_et - now_et).total_seconds() / 60.0),
+                        action=action,
+                        hour_open_btc=hour_open_btc,
+                        current_btc=fetch_btc_spot_from_coinbase(),
+                        cfg=cfg,
+                    )
+                    if force_exit and midpoint is not None:
+                        exit_reason = force_reason
                         exit_price = midpoint
 
-                if exit_reason is None and now_utc >= deadline_utc and midpoint is not None:
+                if exit_reason is None and now_utc >= time_exit_deadline_utc and midpoint is not None:
                     exit_reason = "TIME_EXIT"
                     exit_price = midpoint
 
@@ -628,7 +652,6 @@ def monitor_open_trades(cfg: dict):
                     row["scalp_pnl_pct"] = round(pnl_pct, 2)
 
                     icon = "✅" if scalp_result == "WIN" else "❌"
-
                     send_telegram(
                         cfg,
                         f"{icon} TRADE CLOSED\n"
@@ -642,7 +665,6 @@ def monitor_open_trades(cfg: dict):
                         f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
                     )
                     changed = True
-
             # ---- FINAL SETTLE ----
             if row.get("settle_status", "OPEN") == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
                 settle_btc = fetch_btc_spot_from_coinbase()
