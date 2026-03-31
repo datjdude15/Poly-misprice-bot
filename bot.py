@@ -761,8 +761,8 @@ def maybe_emit_trade(
     entry_price = yes_price if signal == "BUY UP" else no_price
     tier, size = calc_order_size(signal, edge_cents, cfg)
     grade = classify_grade(signal, edge_cents, float(signal_data["prob_up"]), float(signal_data["prob_down"]))
-open_rows = read_csv_rows(get_open_trades_file(cfg))
-closed_rows = read_csv_rows(get_closed_trades_file(cfg)) 
+    open_rows = read_csv_rows(get_open_trades_file(cfg))
+    closed_rows = read_csv_rows(get_closed_trades_file(cfg)) 
    
     if should_block_same_slug_reentry(
         open_rows=open_rows,
