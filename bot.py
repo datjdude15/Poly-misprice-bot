@@ -773,7 +773,7 @@ if should_block_same_slug_reentry(
     prob_down=float(signal_data["prob_down"]),
     move_abs=float(signal_data["abs_move"]),
     cfg=cfg,
-):
+
     log(f"[TRADE] blocked same-slug reentry for slug={market_state.slug} action={signal}")
     return
     trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
