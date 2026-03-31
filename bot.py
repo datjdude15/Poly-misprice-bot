@@ -898,6 +898,20 @@ def main():
     cfg = load_config(args.config)
     poll_seconds = get_poll_seconds(cfg)
 
+    log("=== LAST 60 CLOSED TRADES ===")
+    closed_rows = read_csv_rows(get_closed_trades_file(cfg))
+    for row in closed_rows[-60:]:
+    log(
+        f"[CLOSED] {row.get('entry_utc')} | "
+        f"{row.get('action')} | "
+        f"{row.get('grade')} | "
+        f"entry={row.get('entry_price')} | "
+        f"exit={row.get('scalp_exit_price')} | "
+        f"pnl={row.get('scalp_pnl_pct')}% | "
+        f"reason={row.get('scalp_exit_reason')}"
+    )
+log("=== END CLOSED TRADES ===")
+    
     ensure_csv(get_open_trades_file(cfg), OPEN_FIELDS)
     ensure_csv(get_closed_trades_file(cfg), CLOSED_FIELDS)
 
