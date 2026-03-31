@@ -610,7 +610,7 @@ def monitor_open_trades(cfg: dict):
             
 
             # ---- SCALP EXIT ----
-                        if row.get("scalp_status", "OPEN") == "OPEN":
+            if row.get("scalp_status", "OPEN") == "OPEN":
                 exit_reason = None
                 exit_price = None
 
