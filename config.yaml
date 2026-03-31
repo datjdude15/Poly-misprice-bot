@@ -43,6 +43,13 @@ strategy:
   strong_move_abs: 12
   strong_momentum_score: 80
   strong_grace_period_seconds: 90
+  
+  reentry_prob_shift: 0.15
+  reentry_move_shift: 10.0
+
+  time_pressure_minutes_left: 1.5
+  time_pressure_btc_distance: 120.0
+  time_pressure_min_profit: 0.06
 
 risk:
   bankroll_usd: 1000
