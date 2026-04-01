@@ -241,6 +241,59 @@ def passes_spot_market_disconnect_filter(
     )
 
 
+def passes_ladder_filters(
+    side: str,
+    spot_bars: list[dict],
+    spot_price_now: float,
+    spot_reference_price: float,
+    market_price_now: float,
+    market_reference_price: float,
+    cfg: Dict,
+    now: datetime | None = None,
+) -> tuple[bool, list[str]]:
+    reasons = []
+
+    ok, reason = passes_failed_continuation_filter(
+        spot_bars=spot_bars,
+        side=side,
+        cfg=cfg,
+    )
+    reasons.append(reason)
+    if not ok:
+        return False, reasons
+
+    ok, reason = passes_spot_market_disconnect_filter(
+        side=side,
+        spot_price_now=spot_price_now,
+        spot_reference_price=spot_reference_price,
+        market_price_now=market_price_now,
+        market_reference_price=market_reference_price,
+        cfg=cfg,
+    )
+    reasons.append(reason)
+    if not ok:
+        return False, reasons
+
+    ok, reason = passes_time_left_sweet_spot_filter(
+        cfg=cfg,
+        now=now,
+    )
+    reasons.append(reason)
+    if not ok:
+        return False, reasons
+
+    ok, reason = passes_move_exhaustion_filter(
+        spot_bars=spot_bars,
+        side=side,
+        cfg=cfg,
+    )
+    reasons.append(reason)
+    if not ok:
+        return False, reasons
+
+    return True, reasons
+
+
 def compute_edge_cents(move: float, entry_price: float, side: str) -> float:
     # Heuristic from your current workflow; calibrate from your own logs.
     # The point is consistency across shadow/live logging, not pretending this is theoretical fair value.
