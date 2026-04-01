@@ -25,16 +25,35 @@ class MomentumIndicator:
         if len(self.prices) < 3:
             return 0.5
         delta = self.prices[-1] - self.prices[0]
-        abs_sum = sum(abs(self.prices[i] - self.prices[i - 1]) for i in range(1, len(self.prices))) or 1e-9
+        abs_sum = sum(
+            abs(self.prices[i] - self.prices[i - 1])
+            for i in range(1, len(self.prices))
+        ) or 1e-9
         directional_efficiency = abs(delta) / abs_sum
-        slope = (delta / max(abs(self.prices[0]), 1e-9))
+        slope = delta / max(abs(self.prices[0]), 1e-9)
         raw = 0.5 + max(-0.5, min(0.5, directional_efficiency * 2.0 * slope))
         return max(0.0, min(1.0, raw))
 
 
 def minutes_left_in_hour(ts: datetime | None = None) -> int:
     ts = ts or datetime.now(timezone.utc)
-    return 59 - ts.minute
+    return 60 - ts.minute
+
+
+def pct_change(new_value: float, old_value: float) -> float:
+    if old_value == 0:
+        return 0.0
+    return (new_value - old_value) / old_value
+
+
+def candle_body_size(bar: dict) -> float:
+    return abs(bar["close"] - bar["open"])
+
+
+def get_recent_bars(bars: list[dict], lookback: int) -> list[dict]:
+    if len(bars) < lookback:
+        return bars[:]
+    return bars[-lookback:]
 
 
 def compute_edge_cents(move: float, entry_price: float, side: str) -> float:
@@ -64,7 +83,13 @@ def trade_tier(entry_price: float, edge_cents: float) -> str:
     return "SMALL"
 
 
-def kelly_cash_size(bankroll_usd: float, tier: str, kelly_fraction: float, min_order_usd: float, max_order_usd: float) -> float:
+def kelly_cash_size(
+    bankroll_usd: float,
+    tier: str,
+    kelly_fraction: float,
+    min_order_usd: float,
+    max_order_usd: float,
+) -> float:
     tier_mult = {"LARGE": 1.0, "MEDIUM": 0.67, "SMALL": 0.4}[tier]
     suggested = bankroll_usd * kelly_fraction * tier_mult
     return round(max(min_order_usd, min(max_order_usd, suggested)), 2)
@@ -79,14 +104,23 @@ def evaluate_signal(
     reversal_ok: bool,
 ) -> Dict:
     entry_price = tick.yes_price if direction == "BUY_UP" else tick.no_price
-    edge_cents = compute_edge_cents(tick.btc_price - tick.hour_open, entry_price, direction)
+    edge_cents = compute_edge_cents(
+        tick.btc_price - tick.hour_open,
+        entry_price,
+        direction,
+    )
     setup = choose_setup(entry_price, edge_cents)
     tier = trade_tier(entry_price, edge_cents)
 
-    blocked_by = None
+    blocked_by: Optional[str] = None
+
     if setup == "PASS":
         blocked_by = "FAILED_MIN_EDGE"
-    elif not (cfg["strategy"]["min_entry_price"] <= entry_price <= cfg["strategy"]["max_entry_price"]):
+    elif not (
+        cfg["strategy"]["min_entry_price"]
+        <= entry_price
+        <= cfg["strategy"]["max_entry_price"]
+    ):
         blocked_by = "FAILED_ENTRY_RANGE"
     elif abs(tick.btc_price - tick.hour_open) < cfg["strategy"]["min_move_abs"]:
         blocked_by = "FAILED_MOVE_STRENGTH"
@@ -98,7 +132,10 @@ def evaluate_signal(
         blocked_by = "FAILED_SMALL_TRADE_BLOCK"
 
     mins_left = minutes_left_in_hour(tick.ts)
-    if mins_left < cfg["strategy"]["no_trade_min_minutes_left"] or mins_left > cfg["strategy"]["no_trade_max_minutes_left"]:
+    if (
+        mins_left < cfg["strategy"]["no_trade_min_minutes_left"]
+        or mins_left > cfg["strategy"]["no_trade_max_minutes_left"]
+    ):
         blocked_by = blocked_by or "FAILED_NO_TRADE_WINDOW"
 
     return {
@@ -116,24 +153,3 @@ def evaluate_signal(
         "blocked": blocked_by is not None,
         "blocked_by": blocked_by,
     }
-
-def pct_change(new_value: float, old_value: float) -> float:
-    if old_value == 0:
-        return 0.0
-    return (new_value - old_value) / old_value
-
-
-def candle_body_size(bar: dict) -> float:
-    return abs(bar["close"] - bar["open"])
-
-
-def get_minutes_left_in_hour(now=None) -> int:
-    if now is None:
-        now = datetime.now(timezone.utc)
-    return 60 - now.minute
-
-
-def get_recent_bars(bars: list[dict], lookback: int) -> list[dict]:
-    if len(bars) < lookback:
-        return bars[:]
-    return bars[-lookback:]
