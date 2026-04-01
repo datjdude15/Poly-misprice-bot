@@ -101,6 +101,14 @@ def get_logging_cfg(cfg: dict) -> dict:
     return cfg.get("logging", {})
 
 
+def get_max_spread_pct(cfg: dict) -> float:
+    return float(cfg.get("max_spread_pct", 0.12))
+
+
+def get_min_book_depth(cfg: dict) -> float:
+    return float(cfg.get("min_book_depth", 100))
+
+
 def get_open_trades_file(cfg: dict) -> str:
     return str(get_logging_cfg(cfg).get("open_trade_log_path", DEFAULT_OPEN_TRADES_FILE))
 
