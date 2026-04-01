@@ -12,6 +12,7 @@ import requests
 import yaml
 
 from market_resolver import resolve_current_market_state, fetch_public_clob_midpoint
+from strategy import passes_ladder_filters
 from trade_logic import (
     classify_trade_strength,
     get_dynamic_sl_percent,
@@ -249,6 +250,32 @@ def fetch_order_book_snapshot(token_id: str) -> dict:
         "spread": spread,
         "spread_pct": spread_pct,
     }
+
+
+def build_pseudo_spot_bars(price_history: list[float], chunk_size: int = 3) -> list[dict]:
+    """
+    Temporary fallback until real OHLC bars are implemented.
+    Groups recent BTC spot samples into pseudo-bars.
+
+    With 5-second polling:
+    - chunk_size=3 gives ~15-second bars
+    - chunk_size=6 gives ~30-second bars
+    """
+    if not price_history:
+        return []
+
+    bars = []
+    for i in range(0, len(price_history), chunk_size):
+        chunk = price_history[i:i + chunk_size]
+        if not chunk:
+            continue
+        bars.append({
+            "open": chunk[0],
+            "high": max(chunk),
+            "low": min(chunk),
+            "close": chunk[-1],
+        })
+    return bars
 
 
 def build_signal(
@@ -592,7 +619,6 @@ def safe_close_trade_record(read_csv_rows, write_csv_rows, append_csv_row,
     open_rows = read_csv_rows(open_path)
     closed_rows = read_csv_rows(closed_path)
 
-    # already closed? do nothing
     for row in closed_rows:
         if row.get("trade_id") == trade_id:
             return False
@@ -623,7 +649,6 @@ def monitor_open_trades(cfg: dict):
 
     for row in open_rows:
         try:
-            # HARD STOP: if already closed, never alert again
             if row.get("scalp_status") in ("WIN", "LOSS") and row.get("settle_status") == "CLOSED":
                 continue
 
@@ -650,7 +675,6 @@ def monitor_open_trades(cfg: dict):
                     midpoint = None
             
 
-            # ---- SCALP EXIT ----
             if row.get("scalp_status", "OPEN") == "OPEN":
                 exit_reason = None
                 exit_price = None
@@ -684,8 +708,6 @@ def monitor_open_trades(cfg: dict):
 
                 if midpoint is not None:
                     if midpoint >= tp_price:
-                        # Do not auto-exit immediately if ladder has activated.
-                        # Let runner logic work once profit has matured.
                         if row["exit_mode"] == "LADDER":
                             pass
                         else:
@@ -713,7 +735,7 @@ def monitor_open_trades(cfg: dict):
                         exit_reason = force_reason
                         exit_price = midpoint
 
-                if exit_reason is None and now_utc >= time_exit_deadline_utc and midpoint is not None:
+                if exit_reason is None and now_utc >= deadline_utc and midpoint is not None:
                     exit_reason = "TIME_EXIT"
                     exit_price = midpoint
 
@@ -742,7 +764,7 @@ def monitor_open_trades(cfg: dict):
                         f"PnL: {float(row['scalp_pnl_pct']):.2f}%"
                     )
                     changed = True
-            # ---- FINAL SETTLE ----
+
             if row.get("settle_status", "OPEN") == "OPEN" and now_et >= market_hour_end_et + timedelta(seconds=10):
                 settle_btc = fetch_btc_spot_from_coinbase()
                 went_up = settle_btc > hour_open_btc
@@ -758,7 +780,6 @@ def monitor_open_trades(cfg: dict):
                 row["settle_utc"] = now_utc.isoformat()
                 changed = True
 
-            # move to closed only once
             if row.get("scalp_status") in ("WIN", "LOSS") and row.get("settle_status") == "CLOSED":
                 safe_close_trade_record(
                     read_csv_rows,
@@ -791,6 +812,7 @@ def maybe_emit_trade(
     btc_price: float,
     cfg: dict,
     alert_cooldowns: dict[str, float],
+    recent_spot_bars: list[dict],
 ):
     signal = signal_data["signal"]
     mode = get_mode(cfg).upper()
@@ -861,6 +883,40 @@ def maybe_emit_trade(
     tier, size = calc_order_size(signal, edge_cents, cfg)
     grade = classify_grade(signal, edge_cents, float(signal_data["prob_up"]), float(signal_data["prob_down"]))
 
+    ladder_side = signal.replace(" ", "_")
+    spot_price_now = btc_price
+    spot_reference_price = float(market_state.hour_open_btc)
+    market_price_now = entry_price
+    market_reference_price = 0.50  # temporary fallback anchor until setup-start price is tracked
+
+    passed_ladder_filters, ladder_filter_reasons = passes_ladder_filters(
+        side=ladder_side,
+        spot_bars=recent_spot_bars,
+        spot_price_now=spot_price_now,
+        spot_reference_price=spot_reference_price,
+        market_price_now=market_price_now,
+        market_reference_price=market_reference_price,
+        cfg=cfg,
+        now=datetime.now(UTC),
+    )
+
+    log(
+        f"[LADDER FILTER CHECK] "
+        f"slug={market_state.slug} "
+        f"side={ladder_side} "
+        f"passed={passed_ladder_filters} "
+        f"reasons={ladder_filter_reasons}"
+    )
+
+    if not passed_ladder_filters:
+        log(
+            f"[TRADE] blocked FAILED_LADDER_FILTERS "
+            f"slug={market_state.slug} "
+            f"action={signal} "
+            f"reasons={ladder_filter_reasons}"
+        )
+        return
+
     token_id = market_state.yes_token_id if signal == "BUY UP" else market_state.no_token_id
     book = fetch_order_book_snapshot(token_id)
 
@@ -903,6 +959,7 @@ def maybe_emit_trade(
     ):
         log(f"[TRADE] blocked same-slug reentry for slug={market_state.slug} action={signal}")
         return
+
     trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
     trade_row = create_open_trade_row(
         cfg=cfg,
@@ -1036,6 +1093,8 @@ def main():
             if len(price_history) > 12:
                 price_history = price_history[-12:]
 
+            recent_spot_bars = build_pseudo_spot_bars(price_history, chunk_size=3)
+
             momentum_strength = calc_momentum_strength(price_history)
             abs_move = abs(btc_price - market_state.hour_open_btc)
 
@@ -1077,6 +1136,7 @@ def main():
                 btc_price,
                 cfg,
                 alert_cooldowns,
+                recent_spot_bars,
             )
 
         except Exception as e:
