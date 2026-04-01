@@ -70,3 +70,49 @@ risk:
 logging:
   open_trade_log_path: "open_trades.csv"
   closed_trade_log_path: "closed_trades.csv"
+
+# =========================
+# LADDER FILTERS CONFIG
+# =========================
+
+ENABLE_FAILED_CONTINUATION_FILTER = True
+ENABLE_SPOT_MARKET_DISCONNECT_FILTER = True
+ENABLE_TIME_LEFT_SWEET_SPOT_FILTER = True
+ENABLE_MOVE_EXHAUSTION_FILTER = True
+
+# -------------------------
+# 1) FAILED CONTINUATION
+# -------------------------
+FAILED_CONTINUATION_LOOKBACK_BARS = 4
+FAILED_CONTINUATION_RETEST_BARS = 2
+FAILED_CONTINUATION_MIN_REJECTION_PCT = 0.0005
+# Example: 0.0005 = 0.05%
+
+# -------------------------
+# 2) SPOT VS MARKET DISCONNECT
+# -------------------------
+DISCONNECT_MIN_PREMIUM_PCT = 0.015
+# minimum market premium/stretch required to justify ladder
+# tune later between 0.010 and 0.025
+
+DISCONNECT_MAX_SPOT_CONTINUATION_PCT = 0.0008
+# if spot is still moving too strongly in trade direction, skip
+
+# -------------------------
+# 3) TIME-LEFT SWEET SPOT
+# -------------------------
+MIN_MINUTES_LEFT_FOR_ENTRY = 18
+MAX_MINUTES_LEFT_FOR_ENTRY = 35
+
+# -------------------------
+# 4) MOVE EXHAUSTION
+# -------------------------
+EXHAUSTION_LOOKBACK_BARS = 3
+EXHAUSTION_REQUIRE_SHRINKING_BODIES = True
+EXHAUSTION_MAX_NEW_EXTREMES = 0
+# 0 means do not allow fresh highs/lows during exhaustion window
+
+# -------------------------
+# OPTIONAL SAFETY / DEBUG
+# -------------------------
+LOG_LADDER_FILTERS = True
