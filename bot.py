@@ -860,6 +860,29 @@ def maybe_emit_trade(
     entry_price = yes_price if signal == "BUY UP" else no_price
     tier, size = calc_order_size(signal, edge_cents, cfg)
     grade = classify_grade(signal, edge_cents, float(signal_data["prob_up"]), float(signal_data["prob_down"]))
+
+    token_id = market_state.yes_token_id if signal == "BUY UP" else market_state.no_token_id
+    book = fetch_order_book_snapshot(token_id)
+
+    max_spread_pct = get_max_spread_pct(cfg)
+    min_book_depth = get_min_book_depth(cfg)
+
+    if book["spread_pct"] > max_spread_pct:
+        log(
+            f"[TRADE] blocked LIQUIDITY_FILTER "
+            f"slug={market_state.slug} action={signal} "
+            f"spread_pct={book['spread_pct']:.2%}"
+        )
+        return
+
+    if book["best_bid_size"] < min_book_depth or book["best_ask_size"] < min_book_depth:
+        log(
+            f"[TRADE] blocked DEPTH_FILTER "
+            f"slug={market_state.slug} action={signal} "
+            f"bid_size={book['best_bid_size']:.2f} "
+            f"ask_size={book['best_ask_size']:.2f}"
+        )
+        return
     
     if grade == "WATCH":
         log(f"[TRADE] blocked WATCH grade for slug={market_state.slug}")
