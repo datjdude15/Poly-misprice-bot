@@ -664,7 +664,7 @@ def monitor_open_trades(cfg: dict):
             midpoint = None
             if now_et < market_hour_end_et:
                 try:
-                    state = resolve_current_market_state(cfg)
+                    state = resolve_current_market_state()
                     if state.slug == slug:
                         token = state.yes_token_id if action == "BUY UP" else state.no_token_id
                         midpoint = fetch_public_clob_midpoint(token)
