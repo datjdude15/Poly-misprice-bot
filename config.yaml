@@ -12,6 +12,9 @@ model:
   momentum_weight: 0.35
   time_weight: 0.75
 
+max_spread_pct: 0.12
+min_book_depth: 100
+
 strategy:
   min_edge_cents: 22
   min_move_abs: 1.2
