@@ -222,6 +222,35 @@ def fetch_btc_spot_from_coinbase() -> float:
     return float(r.json()["data"]["amount"])
 
 
+def fetch_order_book_snapshot(token_id: str) -> dict:
+    url = f"https://clob.polymarket.com/book?token_id={token_id}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+
+    bids = data.get("bids", []) or []
+    asks = data.get("asks", []) or []
+
+    best_bid = float(bids[0]["price"]) if bids else 0.0
+    best_ask = float(asks[0]["price"]) if asks else 0.0
+    best_bid_size = float(bids[0]["size"]) if bids else 0.0
+    best_ask_size = float(asks[0]["size"]) if asks else 0.0
+
+    mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
+    spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 999.0
+    spread_pct = spread / max(mid_price, 0.01)
+    
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "best_bid_size": best_bid_size,
+        "best_ask_size": best_ask_size,
+        "mid_price": mid_price,
+        "spread": spread,
+        "spread_pct": spread_pct,
+    }
+
+
 def build_signal(
     prob_up: float,
     yes_price: float,
