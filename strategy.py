@@ -56,6 +56,191 @@ def get_recent_bars(bars: list[dict], lookback: int) -> list[dict]:
     return bars[-lookback:]
 
 
+def passes_time_left_sweet_spot_filter(
+    cfg: Dict,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    ladder_cfg = cfg["strategy"]["ladder_filters"]
+
+    if not ladder_cfg["enable_time_left_sweet_spot_filter"]:
+        return True, "time_left_filter_disabled"
+
+    time_cfg = ladder_cfg["time_left_sweet_spot"]
+    minutes_left = minutes_left_in_hour(now)
+
+    passed = (
+        time_cfg["min_minutes_left_for_entry"]
+        <= minutes_left
+        <= time_cfg["max_minutes_left_for_entry"]
+    )
+
+    if passed:
+        return True, f"time_left_ok:{minutes_left}"
+    return False, f"time_left_out_of_range:{minutes_left}"
+
+
+def passes_move_exhaustion_filter(
+    spot_bars: list[dict],
+    side: str,
+    cfg: Dict,
+) -> tuple[bool, str]:
+    ladder_cfg = cfg["strategy"]["ladder_filters"]
+
+    if not ladder_cfg["enable_move_exhaustion_filter"]:
+        return True, "move_exhaustion_disabled"
+
+    exhaustion_cfg = ladder_cfg["move_exhaustion"]
+    recent = get_recent_bars(spot_bars, exhaustion_cfg["lookback_bars"])
+
+    if len(recent) < exhaustion_cfg["lookback_bars"]:
+        return True, "move_exhaustion_insufficient_bars"
+
+    bodies = [candle_body_size(bar) for bar in recent]
+
+    shrinking_bodies = True
+    if exhaustion_cfg["require_shrinking_bodies"]:
+        shrinking_bodies = all(
+            bodies[i] <= bodies[i - 1] for i in range(1, len(bodies))
+        )
+
+    new_extremes = 0
+    if side == "BUY_UP":
+        running_high = recent[0]["high"]
+        for bar in recent[1:]:
+            if bar["high"] > running_high:
+                new_extremes += 1
+                running_high = bar["high"]
+    else:
+        running_low = recent[0]["low"]
+        for bar in recent[1:]:
+            if bar["low"] < running_low:
+                new_extremes += 1
+                running_low = bar["low"]
+
+    no_fresh_extremes = new_extremes <= exhaustion_cfg["max_new_extremes"]
+    passed = shrinking_bodies and no_fresh_extremes
+
+    if passed:
+        return True, f"move_exhaustion_ok:bodies={bodies},new_extremes={new_extremes}"
+    return False, f"move_exhaustion_fail:bodies={bodies},new_extremes={new_extremes}"
+
+
+def passes_failed_continuation_filter(
+    spot_bars: list[dict],
+    side: str,
+    cfg: Dict,
+) -> tuple[bool, str]:
+    ladder_cfg = cfg["strategy"]["ladder_filters"]
+
+    if not ladder_cfg["enable_failed_continuation_filter"]:
+        return True, "failed_continuation_disabled"
+
+    fc_cfg = ladder_cfg["failed_continuation"]
+    lookback = fc_cfg["lookback_bars"]
+    retest_bars = fc_cfg["retest_bars"]
+    min_rejection_pct = fc_cfg["min_rejection_pct"]
+
+    recent = get_recent_bars(spot_bars, lookback)
+
+    if len(recent) < lookback:
+        return True, "failed_continuation_insufficient_bars"
+
+    pre_retest = recent[:-retest_bars]
+    retest_window = recent[-retest_bars:]
+
+    if not pre_retest or not retest_window:
+        return True, "failed_continuation_insufficient_structure"
+
+    if side == "BUY_UP":
+        old_extreme = max(bar["high"] for bar in pre_retest)
+        retest_high = max(bar["high"] for bar in retest_window)
+        final_close = retest_window[-1]["close"]
+
+        retest_happened = retest_high >= old_extreme * (1 - min_rejection_pct)
+        failed_hold = final_close < old_extreme
+        passed = retest_happened and failed_hold
+
+        if passed:
+            return True, (
+                f"failed_up_continuation_ok:"
+                f"old_extreme={old_extreme},"
+                f"retest_high={retest_high},"
+                f"final_close={final_close}"
+            )
+        return False, (
+            f"failed_up_continuation_fail:"
+            f"old_extreme={old_extreme},"
+            f"retest_high={retest_high},"
+            f"final_close={final_close}"
+        )
+
+    old_extreme = min(bar["low"] for bar in pre_retest)
+    retest_low = min(bar["low"] for bar in retest_window)
+    final_close = retest_window[-1]["close"]
+
+    retest_happened = retest_low <= old_extreme * (1 + min_rejection_pct)
+    failed_hold = final_close > old_extreme
+    passed = retest_happened and failed_hold
+
+    if passed:
+        return True, (
+            f"failed_down_continuation_ok:"
+            f"old_extreme={old_extreme},"
+            f"retest_low={retest_low},"
+            f"final_close={final_close}"
+        )
+    return False, (
+        f"failed_down_continuation_fail:"
+        f"old_extreme={old_extreme},"
+        f"retest_low={retest_low},"
+        f"final_close={final_close}"
+    )
+
+
+def passes_spot_market_disconnect_filter(
+    side: str,
+    spot_price_now: float,
+    spot_reference_price: float,
+    market_price_now: float,
+    market_reference_price: float,
+    cfg: Dict,
+) -> tuple[bool, str]:
+    ladder_cfg = cfg["strategy"]["ladder_filters"]
+
+    if not ladder_cfg["enable_spot_market_disconnect_filter"]:
+        return True, "spot_market_disconnect_disabled"
+
+    disconnect_cfg = ladder_cfg["spot_market_disconnect"]
+
+    spot_move_pct = pct_change(spot_price_now, spot_reference_price)
+    market_move_pct = pct_change(market_price_now, market_reference_price)
+
+    if side == "BUY_UP":
+        spot_ok = spot_move_pct <= disconnect_cfg["max_spot_continuation_pct"]
+        premium = market_move_pct - spot_move_pct
+        premium_ok = premium >= disconnect_cfg["min_premium_pct"]
+    else:
+        spot_ok = abs(min(spot_move_pct, 0.0)) <= disconnect_cfg["max_spot_continuation_pct"]
+        premium = abs(market_move_pct) - abs(spot_move_pct)
+        premium_ok = premium >= disconnect_cfg["min_premium_pct"]
+
+    passed = spot_ok and premium_ok
+
+    if passed:
+        return True, (
+            f"disconnect_ok:"
+            f"spot_move={spot_move_pct:.5f},"
+            f"market_move={market_move_pct:.5f},"
+            f"premium={premium:.5f}"
+        )
+    return False, (
+        f"disconnect_fail:"
+        f"spot_move={spot_move_pct:.5f},"
+        f"market_move={market_move_pct:.5f},"
+        f"premium={premium:.5f}"
+    )
+
+
 def compute_edge_cents(move: float, entry_price: float, side: str) -> float:
     # Heuristic from your current workflow; calibrate from your own logs.
     # The point is consistency across shadow/live logging, not pretending this is theoretical fair value.
