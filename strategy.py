@@ -116,3 +116,24 @@ def evaluate_signal(
         "blocked": blocked_by is not None,
         "blocked_by": blocked_by,
     }
+
+def pct_change(new_value: float, old_value: float) -> float:
+    if old_value == 0:
+        return 0.0
+    return (new_value - old_value) / old_value
+
+
+def candle_body_size(bar: dict) -> float:
+    return abs(bar["close"] - bar["open"])
+
+
+def get_minutes_left_in_hour(now=None) -> int:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return 60 - now.minute
+
+
+def get_recent_bars(bars: list[dict], lookback: int) -> list[dict]:
+    if len(bars) < lookback:
+        return bars[:]
+    return bars[-lookback:]
