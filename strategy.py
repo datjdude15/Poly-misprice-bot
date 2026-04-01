@@ -220,7 +220,8 @@ def passes_spot_market_disconnect_filter(
         premium = market_move_pct - spot_move_pct
         premium_ok = premium >= disconnect_cfg["min_premium_pct"]
     else:
-        spot_ok = abs(min(spot_move_pct, 0.0)) <= disconnect_cfg["max_spot_continuation_pct"]
+        spot_down_move = abs(min(spot_move_pct, 0.0))
+        spot_ok = spot_down_move <= disconnect_cfg["max_spot_continuation_pct"]
         premium = abs(market_move_pct) - abs(spot_move_pct)
         premium_ok = premium >= disconnect_cfg["min_premium_pct"]
 
