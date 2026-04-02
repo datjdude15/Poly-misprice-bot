@@ -46,6 +46,7 @@ OPEN_FIELDS = [
     "prob_down",
     "momentum",
     "move",
+    "market_regime"
     "btc_entry",
     "hour_open_btc",
     "tp_price",
@@ -277,6 +278,138 @@ def build_pseudo_spot_bars(price_history: list[float], chunk_size: int = 3) -> l
             "close": chunk[-1],
         })
     return bars
+
+
+def bar_range(bar: dict) -> float:
+    return max(0.0, float(bar["high"]) - float(bar["low"]))
+
+
+def bar_overlap_pct(bar1: dict, bar2: dict) -> float:
+    """
+    Returns overlap as % of the smaller bar's range.
+    """
+    high1, low1 = float(bar1["high"]), float(bar1["low"])
+    high2, low2 = float(bar2["high"]), float(bar2["low"])
+
+    overlap = max(0.0, min(high1, high2) - max(low1, low2))
+    min_range = max(min(bar_range(bar1), bar_range(bar2)), 1e-9)
+    return overlap / min_range
+
+
+def classify_market_regime(
+    price_history: list[float],
+    pseudo_bars: list[dict],
+    btc_price: float,
+    hour_open_btc: float,
+    minutes_left: float,
+) -> str:
+    """
+    Regimes:
+    - trend
+    - chop
+    - late_acceleration
+    - spike_fade
+    - neutral
+    """
+    if len(price_history) < 6 or len(pseudo_bars) < 3:
+        return "neutral"
+
+    abs_move = abs(btc_price - hour_open_btc)
+
+    # ---- trend detection ----
+    higher_highs = 0
+    higher_lows = 0
+    lower_highs = 0
+    lower_lows = 0
+
+    for i in range(1, len(pseudo_bars)):
+        prev_bar = pseudo_bars[i - 1]
+        curr_bar = pseudo_bars[i]
+
+        if curr_bar["high"] > prev_bar["high"]:
+            higher_highs += 1
+        if curr_bar["low"] > prev_bar["low"]:
+            higher_lows += 1
+        if curr_bar["high"] < prev_bar["high"]:
+            lower_highs += 1
+        if curr_bar["low"] < prev_bar["low"]:
+            lower_lows += 1
+
+    directional_trend = (
+        (higher_highs >= 2 and higher_lows >= 2)
+        or (lower_highs >= 2 and lower_lows >= 2)
+    )
+
+    # ---- chop detection ----
+    open_crosses = 0
+    for i in range(1, len(price_history)):
+        prev_diff = price_history[i - 1] - hour_open_btc
+        curr_diff = price_history[i] - hour_open_btc
+        if prev_diff == 0:
+            continue
+        if (prev_diff > 0 and curr_diff < 0) or (prev_diff < 0 and curr_diff > 0):
+            open_crosses += 1
+
+    overlaps = []
+    for i in range(1, len(pseudo_bars)):
+        overlaps.append(bar_overlap_pct(pseudo_bars[i - 1], pseudo_bars[i]))
+    avg_overlap = sum(overlaps) / len(overlaps) if overlaps else 0.0
+
+    chop_like = open_crosses >= 2 and avg_overlap >= 0.45
+
+    # ---- late acceleration detection ----
+    early_prices = price_history[: max(3, len(price_history) // 2)]
+    early_move = abs(early_prices[-1] - early_prices[0]) if len(early_prices) >= 2 else 0.0
+
+    recent_bars = pseudo_bars[-2:]
+    recent_ranges = [bar_range(bar) for bar in recent_bars]
+    recent_expansion = all(r > 0 for r in recent_ranges) and (
+        recent_ranges[-1] >= recent_ranges[0] * 1.15
+    )
+
+    late_accel_like = (
+        minutes_left <= 25
+        and early_move < max(8.0, abs_move * 0.45)
+        and abs_move >= 12.0
+        and recent_expansion
+    )
+
+    # ---- spike fade detection ----
+    first_half = pseudo_bars[: max(2, len(pseudo_bars) // 2)]
+    second_half = pseudo_bars[max(1, len(pseudo_bars) // 2):]
+
+    first_half_ranges = [bar_range(b) for b in first_half]
+    second_half_ranges = [bar_range(b) for b in second_half]
+
+    first_half_avg = sum(first_half_ranges) / len(first_half_ranges) if first_half_ranges else 0.0
+    second_half_avg = sum(second_half_ranges) / len(second_half_ranges) if second_half_ranges else 0.0
+
+    recent_bodies = [abs(b["close"] - b["open"]) for b in pseudo_bars[-3:]]
+    shrinking_bodies = len(recent_bodies) >= 3 and (
+        recent_bodies[-1] <= recent_bodies[-2] <= recent_bodies[-3]
+    )
+
+    spike_fade_like = (
+        abs_move >= 18.0
+        and first_half_avg > 0
+        and second_half_avg < first_half_avg * 0.85
+        and shrinking_bodies
+    )
+
+    # ---- classify in priority order ----
+    if late_accel_like:
+        return "late_acceleration"
+
+    if spike_fade_like:
+        return "spike_fade"
+
+    if chop_like:
+        return "chop"
+
+    if directional_trend:
+        return "trend"
+
+    return "neutral"
 
 
 def build_signal(
@@ -528,6 +661,7 @@ def create_open_trade_row(
     move: float,
     btc_price: float,
     ladder_eligible: bool,
+    market_regime: str,
 ) -> dict:
     tp_pct = get_tp_pct(cfg)
     minutes_left = calc_minutes_left()
@@ -563,6 +697,7 @@ def create_open_trade_row(
         "prob_down": round(prob_down, 4),
         "momentum": round(momentum, 1),
         "move": round(move, 2),
+        "market_regime": market_regime,
         "btc_entry": round(btc_price, 2),
         "hour_open_btc": round(float(market_state.hour_open_btc), 2),
         "tp_price": tp_price,
@@ -814,6 +949,7 @@ def maybe_emit_trade(
     cfg: dict,
     alert_cooldowns: dict[str, float],
     recent_spot_bars: list[dict],
+    market_regime: str,
 ):
     signal = signal_data["signal"]
     mode = get_mode(cfg).upper()
@@ -987,6 +1123,7 @@ def maybe_emit_trade(
         move=float(signal_data["abs_move"]),
         btc_price=float(btc_price),
         ladder_eligible=ladder_eligible,
+        market_regime=market_regime,p
     )
     append_csv_row(get_open_trades_file(cfg), OPEN_FIELDS, trade_row)
 
