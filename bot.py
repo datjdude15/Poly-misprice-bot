@@ -1123,7 +1123,7 @@ def maybe_emit_trade(
         move=float(signal_data["abs_move"]),
         btc_price=float(btc_price),
         ladder_eligible=ladder_eligible,
-        market_regime=market_regime,p
+        market_regime=market_regime,
     )
     append_csv_row(get_open_trades_file(cfg), OPEN_FIELDS, trade_row)
 
