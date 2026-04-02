@@ -541,7 +541,7 @@ def create_open_trade_row(
     )
 
     max_hold_seconds = get_max_hold_seconds(cfg)
-    "ladder_eligible": str(ladder_eligible),
+    ladder_eligible: str(ladder_eligible),
     tp_price = round(entry_price * (1.0 + tp_pct), 4)
     sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
     
