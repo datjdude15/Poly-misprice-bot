@@ -971,7 +971,7 @@ def maybe_emit_trade(
         return
 
     trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
-        trade_row = create_open_trade_row(
+    trade_row = create_open_trade_row(
         cfg=cfg,
         trade_id=trade_id,
         market_state=market_state,
