@@ -239,10 +239,22 @@ def fetch_order_book_snapshot(token_id: str) -> dict:
     best_bid_size = float(bids[0]["size"]) if bids else 0.0
     best_ask_size = float(asks[0]["size"]) if asks else 0.0
 
-    mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
-    spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 999.0
+    if best_bid <= 0 or best_ask <= 0:
+        return {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "best_bid_size": best_bid_size,
+            "best_ask_size": best_ask_size,
+            "mid_price": 0.0,
+            "spread": 0.0,
+            "spread_pct": 0.0,
+            "book_valid": False,
+        }
+
+    mid_price = (best_bid + best_ask) / 2.0
+    spread = abs(best_ask - best_bid)
     spread_pct = spread / max(mid_price, 0.01)
-    
+
     return {
         "best_bid": best_bid,
         "best_ask": best_ask,
@@ -251,8 +263,8 @@ def fetch_order_book_snapshot(token_id: str) -> dict:
         "mid_price": mid_price,
         "spread": spread,
         "spread_pct": spread_pct,
+        "book_valid": True,
     }
-
 
 def build_pseudo_spot_bars(price_history: list[float], chunk_size: int = 3) -> list[dict]:
     """
