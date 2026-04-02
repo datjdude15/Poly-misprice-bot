@@ -1059,6 +1059,7 @@ def main():
 
     price_history: list[float] = []
     current_slug = None
+    current_hour_open_btc: float | None = None
     alert_cooldowns: dict[str, float] = {}
     last_heartbeat_ts = 0.0
     last_tracker_ts = 0.0
@@ -1076,16 +1077,31 @@ def main():
                 last_tracker_ts = now_ts
 
             market_state = resolve_current_market_state()
-            
+            btc_price = fetch_btc_spot_from_coinbase()
+
             if current_slug != market_state.slug:
                 price_history = []
                 current_slug = market_state.slug
+                current_hour_open_btc = btc_price
+                log(
+                    f"[ANCHOR] New hour anchor set "
+                    f"slug={market_state.slug} "
+                    f"hour_open_btc={current_hour_open_btc:.2f}"
+                )
 
-            btc_price = fetch_btc_spot_from_coinbase()
+            if current_hour_open_btc is None:
+                current_hour_open_btc = btc_price
+                log(
+                    f"[ANCHOR] Fallback hour anchor set "
+                    f"slug={market_state.slug} "
+                    f"hour_open_btc={current_hour_open_btc:.2f}"
+                )
+
+            market_state.hour_open_btc = current_hour_open_btc
+
             yes_price = fetch_public_clob_midpoint(market_state.yes_token_id)
             no_price = fetch_public_clob_midpoint(market_state.no_token_id)
             minutes_left = calc_minutes_left()
-
             price_history.append(btc_price)
             if len(price_history) > 12:
                 price_history = price_history[-12:]
