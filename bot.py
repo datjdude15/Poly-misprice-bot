@@ -541,7 +541,6 @@ def create_open_trade_row(
     )
 
     max_hold_seconds = get_max_hold_seconds(cfg)
-    "ladder_eligible": str(ladder_eligible),
     tp_price = round(entry_price * (1.0 + tp_pct), 4)
     sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
     
@@ -569,6 +568,7 @@ def create_open_trade_row(
         "tp_price": tp_price,
         "sl_price": sl_price,
         "max_hold_seconds": max_hold_seconds,
+        "ladder_eligible": str(ladder_eligible),
         "time_exit_deadline_utc": (now_utc + timedelta(seconds=max_hold_seconds)).isoformat(),
         "market_hour_end_et": hour_end_et.isoformat(),
         "scalp_status": "OPEN",
