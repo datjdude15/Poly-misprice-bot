@@ -46,7 +46,7 @@ OPEN_FIELDS = [
     "prob_down",
     "momentum",
     "move",
-    "market_regime",
+    "market_regime"
     "btc_entry",
     "hour_open_btc",
     "tp_price",
@@ -239,22 +239,10 @@ def fetch_order_book_snapshot(token_id: str) -> dict:
     best_bid_size = float(bids[0]["size"]) if bids else 0.0
     best_ask_size = float(asks[0]["size"]) if asks else 0.0
 
-    if best_bid <= 0 or best_ask <= 0:
-        return {
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "best_bid_size": best_bid_size,
-            "best_ask_size": best_ask_size,
-            "mid_price": 0.0,
-            "spread": 0.0,
-            "spread_pct": 0.0,
-            "book_valid": False,
-        }
-
-    mid_price = (best_bid + best_ask) / 2.0
-    spread = abs(best_ask - best_bid)
+    mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else 0.0
+    spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 999.0
     spread_pct = spread / max(mid_price, 0.01)
-
+    
     return {
         "best_bid": best_bid,
         "best_ask": best_ask,
@@ -263,7 +251,6 @@ def fetch_order_book_snapshot(token_id: str) -> dict:
         "mid_price": mid_price,
         "spread": spread,
         "spread_pct": spread_pct,
-        "book_valid": True,
     }
 
 
@@ -1079,33 +1066,11 @@ def maybe_emit_trade(
     token_id = market_state.yes_token_id if signal == "BUY UP" else market_state.no_token_id
     book = fetch_order_book_snapshot(token_id)
 
-    log(
-        f"[BOOK DEBUG] slug={market_state.slug} action={signal} "
-        f"token_id={token_id} "
-        f"bid={book['best_bid']:.4f} ask={book['best_ask']:.4f} "
-        f"bid_size={book['best_bid_size']:.2f} ask_size={book['best_ask_size']:.2f} "
-        f"spread_pct={book['spread_pct']:.2%} "
-        f"valid={book.get('book_valid', True)}"
-    )
-
-    max_spread_pct = get_max_spread_pct(cfg)
     min_book_depth = get_min_book_depth(cfg)
-
-    if not book.get("book_valid", True):
-        log(f"[TRADE] skipped INVALID_BOOK slug={market_state.slug}")
-        return
-
-    if book["spread_pct"] > max_spread_pct:
-        log(
-            f"[TRADE] blocked LIQUIDITY_FILTER "
-            f"slug={market_state.slug} action={signal} "
-            f"spread_pct={book['spread_pct']:.2%}"
-        )
-        return
 
     if book["best_bid_size"] < min_book_depth or book["best_ask_size"] < min_book_depth:
         log(
-            f"[TRADE] blocked DEPTH_FILTER "
+            f"[TRADE] blocked SIZE_FILTER "
             f"slug={market_state.slug} action={signal} "
             f"bid_size={book['best_bid_size']:.2f} "
             f"ask_size={book['best_ask_size']:.2f}"
