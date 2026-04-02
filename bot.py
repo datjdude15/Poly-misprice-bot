@@ -54,6 +54,7 @@ OPEN_FIELDS = [
     "highest_midpoint_seen",
     "ladder_stop_price",
     "exit_mode",
+    "ladder_eligible",
     "time_exit_deadline_utc",
     "market_hour_end_et",
     "scalp_status",
@@ -526,6 +527,7 @@ def create_open_trade_row(
     momentum: float,
     move: float,
     btc_price: float,
+    ladder_eligible: bool,
 ) -> dict:
     tp_pct = get_tp_pct(cfg)
     minutes_left = calc_minutes_left()
@@ -539,7 +541,7 @@ def create_open_trade_row(
     )
 
     max_hold_seconds = get_max_hold_seconds(cfg)
-
+    "ladder_eligible": str(ladder_eligible),
     tp_price = round(entry_price * (1.0 + tp_pct), 4)
     sl_price = round(max(entry_price * (1.0 - sl_pct), 0.001), 4)
     
@@ -685,7 +687,9 @@ def monitor_open_trades(cfg: dict):
                 minutes_left = max(0.0, (market_hour_end_et - now_et).total_seconds() / 60.0)
 
                 ladder_stop_price = None
-                if midpoint is not None:
+                ladder_eligible = str(row.get("ladder_eligible", "False")).lower() == "true"
+
+                if midpoint is not None and ladder_eligible:
                     ladder_stop_price, ladder_updates = compute_ladder_exit_price(
                         entry_price=entry_price,
                         midpoint=midpoint,
@@ -897,22 +901,31 @@ def maybe_emit_trade(
         now=datetime.now(UTC),
     )
 
+    ladder_eligible = bool(passed_ladder_filters)
+
     log(
         f"[LADDER FILTER CHECK] "
         f"slug={market_state.slug} "
         f"side={ladder_side} "
         f"passed={passed_ladder_filters} "
+        f"ladder_eligible={ladder_eligible} "
         f"reasons={ladder_filter_reasons}"
     )
 
-    if not passed_ladder_filters:
+    if not ladder_eligible:
         log(
-            f"[TRADE] blocked FAILED_LADDER_FILTERS "
+            f"[TRADE] normal-mode only "
             f"slug={market_state.slug} "
             f"action={signal} "
             f"reasons={ladder_filter_reasons}"
         )
-        return
+    else:
+        log(
+            f"[TRADE] ladder-eligible "
+            f"slug={market_state.slug} "
+            f"action={signal} "
+            f"reasons={ladder_filter_reasons}"
+        )
 
     token_id = market_state.yes_token_id if signal == "BUY UP" else market_state.no_token_id
     book = fetch_order_book_snapshot(token_id)
@@ -958,7 +971,7 @@ def maybe_emit_trade(
         return
 
     trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
-    trade_row = create_open_trade_row(
+        trade_row = create_open_trade_row(
         cfg=cfg,
         trade_id=trade_id,
         market_state=market_state,
@@ -973,6 +986,7 @@ def maybe_emit_trade(
         momentum=float(signal_data["momentum_strength"]),
         move=float(signal_data["abs_move"]),
         btc_price=float(btc_price),
+        ladder_eligible=ladder_eligible,
     )
     append_csv_row(get_open_trades_file(cfg), OPEN_FIELDS, trade_row)
 
@@ -980,6 +994,7 @@ def maybe_emit_trade(
         f"[TRADE] mode={mode} "
         f"slug={market_state.slug} "
         f"action={signal} "
+        f"ladder_eligible={ladder_eligible} "
         f"grade={grade} "
         f"entry={entry_price:.3f} "
         f"edge={edge_cents}c "
