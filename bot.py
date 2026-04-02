@@ -1131,6 +1131,7 @@ def maybe_emit_trade(
         f"[TRADE] mode={mode} "
         f"slug={market_state.slug} "
         f"action={signal} "
+        f"regime={market_regime} "
         f"ladder_eligible={ladder_eligible} "
         f"grade={grade} "
         f"entry={entry_price:.3f} "
@@ -1260,6 +1261,14 @@ def main():
 
             recent_spot_bars = build_pseudo_spot_bars(price_history, chunk_size=3)
 
+            market_regime = classify_market_regime(
+                price_history=price_history,
+                pseudo_bars=recent_spot_bars,
+                btc_price=btc_price,
+                hour_open_btc=market_state.hour_open_btc,
+                minutes_left=minutes_left,
+            )
+            
             momentum_strength = calc_momentum_strength(price_history)
             abs_move = abs(btc_price - market_state.hour_open_btc)
 
@@ -1280,6 +1289,7 @@ def main():
                 f"no={no_price if no_price is not None else 'None'} "
                 f"mom={momentum_strength:.1f} "
                 f"mins_left={minutes_left:.1f}"
+                f"regime={market_regime} "
             )
 
             signal_data = build_signal(
@@ -1302,6 +1312,7 @@ def main():
                 cfg,
                 alert_cooldowns,
                 recent_spot_bars,
+                market_regime,
             )
 
         except Exception as e:
