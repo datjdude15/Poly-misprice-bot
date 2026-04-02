@@ -46,7 +46,7 @@ OPEN_FIELDS = [
     "prob_down",
     "momentum",
     "move",
-    "market_regime"
+    "market_regime",
     "btc_entry",
     "hour_open_btc",
     "tp_price",
@@ -1080,6 +1080,14 @@ def maybe_emit_trade(
 
     max_spread_pct = get_max_spread_pct(cfg)
     min_book_depth = get_min_book_depth(cfg)
+
+    if not book.get("book_valid", True):
+        log(
+            f"[TRADE] skipped INVALID_BOOK "
+            f"slug={market_state.slug} action={signal} "
+            f"bid={book['best_bid']:.4f} ask={book['best_ask']:.4f}"
+        )
+        return
 
     if book["spread_pct"] > max_spread_pct:
         log(
