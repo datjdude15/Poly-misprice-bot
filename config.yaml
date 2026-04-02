@@ -16,7 +16,7 @@ max_spread_pct: 0.12
 min_book_depth: 100
 
 strategy:
-  min_edge_cents: 22
+  min_edge_cents: 12
   min_move_abs: 1.2
   min_entry_price: 0.015
   max_entry_price: 0.80
