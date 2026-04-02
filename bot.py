@@ -266,6 +266,7 @@ def fetch_order_book_snapshot(token_id: str) -> dict:
         "book_valid": True,
     }
 
+
 def build_pseudo_spot_bars(price_history: list[float], chunk_size: int = 3) -> list[dict]:
     """
     Temporary fallback until real OHLC bars are implemented.
@@ -1078,15 +1079,20 @@ def maybe_emit_trade(
     token_id = market_state.yes_token_id if signal == "BUY UP" else market_state.no_token_id
     book = fetch_order_book_snapshot(token_id)
 
+    log(
+        f"[BOOK DEBUG] slug={market_state.slug} action={signal} "
+        f"token_id={token_id} "
+        f"bid={book['best_bid']:.4f} ask={book['best_ask']:.4f} "
+        f"bid_size={book['best_bid_size']:.2f} ask_size={book['best_ask_size']:.2f} "
+        f"spread_pct={book['spread_pct']:.2%} "
+        f"valid={book.get('book_valid', True)}"
+    )
+
     max_spread_pct = get_max_spread_pct(cfg)
     min_book_depth = get_min_book_depth(cfg)
 
     if not book.get("book_valid", True):
-        log(
-            f"[TRADE] skipped INVALID_BOOK "
-            f"slug={market_state.slug} action={signal} "
-            f"bid={book['best_bid']:.4f} ask={book['best_ask']:.4f}"
-        )
+        log(f"[TRADE] skipped INVALID_BOOK slug={market_state.slug}")
         return
 
     if book["spread_pct"] > max_spread_pct:
