@@ -19,13 +19,13 @@ strategy:
   min_edge_cents: 12
   min_move_abs: 1.2
   min_entry_price: 0.015
-  max_entry_price: 0.80
+  max_entry_price: 0.90
   small_trade_block_min_price: 0.01
   no_trade_min_minutes_left: 2
   no_trade_max_minutes_left: 58
-  momentum_min_score: 42
+  momentum_min_score: 20
   strong_edge_override_cents: 38
-  high_momentum_override_score: 85
+  high_momentum_override_score: 75
   min_prob_trade: 0.55
 
   telegram_trade_alerts: true
