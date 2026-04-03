@@ -147,7 +147,7 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
         or ""
     ).strip().lower()
 
-        combined = f"{slug} {question}"
+    combine = f"{slug} {question}"
 
     expected_slug = build_btc_hourly_slug(candidate_dt)
     if slug == expected_slug:
