@@ -147,18 +147,17 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
         or ""
     ).strip().lower()
 
-    combined = f"{slug} {question}"
+        combined = f"{slug} {question}"
 
     expected_slug = build_btc_hourly_slug(candidate_dt)
     if slug == expected_slug:
         return True
 
+    # only require BTC reference
     if "bitcoin" not in combined and "btc" not in combined:
         return False
 
-    if "up or down" not in combined:
-        return False
-
+    # exclude non-hourly BTC products
     if "4 hour" in combined or "4h" in combined:
         return False
     if "5 minute" in combined or "5m" in combined:
@@ -192,35 +191,63 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
 
     return any(bit in combined for bit in hour_bits)
 
+    month_name = candidate_dt.strftime("%B").lower()
+    day = candidate_dt.day
+    year = candidate_dt.year
+    hour_12, suffix = _to_12h(candidate_dt.hour)
 
-def _resolve_from_active_market_scan(candidate_times: list[datetime]) -> tuple[dict, datetime]:
-    markets = fetch_active_markets(limit=2000)
+    if month_name not in combined:
+        return False
+    if str(day) not in combined:
+        return False
+    if str(year) not in combined:
+        return False
 
-    btc_like = []
-    for market in markets:
-        slug = str(market.get("slug", "")).strip().lower()
-        question = str(
-            market.get("question")
-            or market.get("title")
-            or market.get("name")
-            or ""
-        ).strip().lower()
+    hour_bits = [
+        f"{hour_12}{suffix}",
+        f"{hour_12}:00{suffix}",
+        f"{hour_12} {suffix}",
+        f"{hour_12}:00 {suffix}",
+        f"{hour_12}{suffix}-et",
+        f"{hour_12}:00{suffix}-et",
+        f"{hour_12}{suffix} et",
+        f"{hour_12}:00{suffix} et",
+        f"{hour_12}:00 {suffix} et",
+    ]
 
-        combined = f"{slug} | {question}"
+    return any(bit in combined for bit in hour_bits)
 
-        if ("bitcoin" in combined or "btc" in combined) and "up or down" in combined:
-            btc_like.append(combined)
 
-    print(f"[RESOLVER] Active BTC-like markets found: {len(btc_like)}")
-    for sample in btc_like[:15]:
-        print(f"[RESOLVER] BTC MARKET SAMPLE -> {sample}")
+def fetch_active_markets(limit: int = 500) -> list[dict]:
+    all_markets = []
+    offset = 0
 
-    for candidate_dt in candidate_times:
-        for market in markets:
-            if _is_matching_btc_hourly_market(market, candidate_dt):
-                return market, candidate_dt
+    while True:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "offset": offset,
+        }
+        resp = requests.get(GAMMA_EVENTS_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
 
-    raise Exception("No matching active BTC hourly market found from active market scan")
+        if not isinstance(data, list) or not data:
+            break
+
+        for event in data:
+            event_markets = event.get("markets", []) or []
+            if isinstance(event_markets, list):
+                all_markets.extend(event_markets)
+
+        if len(data) < limit:
+            break
+
+        offset += limit
+
+    print(f"[RESOLVER] Active markets from events: {len(all_markets)}")
+    return all_markets
 
 
 def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
