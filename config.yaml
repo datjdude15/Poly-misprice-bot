@@ -18,7 +18,7 @@ min_book_depth: 100
 strategy:
   min_edge_cents: 12
   min_move_abs: 6
-  min_entry_price: 0.015
+  min_entry_price: 0.07
   max_entry_price: 0.75
   small_trade_block_min_price: 0.01
   no_trade_min_minutes_left: 2
@@ -66,7 +66,7 @@ strategy:
     enable_failed_continuation_filter: true
     enable_spot_market_disconnect_filter: true
     enable_time_left_sweet_spot_filter: true
-    enable_move_exhaustion_filter: true
+    enable_move_exhaustion_filter: false
 
     failed_continuation:
       lookback_bars: 4
