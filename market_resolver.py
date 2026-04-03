@@ -116,10 +116,11 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
     base_et = now_et.replace(minute=0, second=0, microsecond=0)
 
     candidate_times = [
-        base_et + timedelta(hours=1),
         base_et,
+        base_et + timedelta(hours=1),
+        base_et - timedelta(hours=1),
     ]
-
+    
     last_error = None
 
     for candidate_dt in candidate_times:
