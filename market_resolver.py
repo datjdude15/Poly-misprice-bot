@@ -71,9 +71,9 @@ def fetch_market_by_slug(slug: str) -> dict:
 
 def fetch_active_markets(limit: int = 2000) -> list[dict]:
     params = {
+        "limit": limit,
         "active": "true",
         "closed": "false",
-        "limit": limit,
     }
     resp = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
     resp.raise_for_status()
@@ -125,19 +125,11 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
         or ""
     ).strip().lower()
 
-    month_name = candidate_dt.strftime("%B").lower()
-    day = candidate_dt.day
-    year = candidate_dt.year
-    hour_12, suffix = _to_12h(candidate_dt.hour)
+    combined = f"{slug} {question}"
 
     expected_slug = build_btc_hourly_slug(candidate_dt)
-
-    # Exact slug match first
     if slug == expected_slug:
         return True
-
-    # Must be BTC/Bitcoin up-down style market
-    combined = f"{slug} {question}"
 
     if "bitcoin" not in combined and "btc" not in combined:
         return False
@@ -145,7 +137,6 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
     if "up or down" not in combined:
         return False
 
-    # Exclude non-hourly BTC products
     if "4 hour" in combined or "4h" in combined:
         return False
     if "5 minute" in combined or "5m" in combined:
@@ -153,7 +144,11 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
     if "15 minute" in combined or "15m" in combined:
         return False
 
-    # Require correct date
+    month_name = candidate_dt.strftime("%B").lower()
+    day = candidate_dt.day
+    year = candidate_dt.year
+    hour_12, suffix = _to_12h(candidate_dt.hour)
+
     if month_name not in combined:
         return False
     if str(day) not in combined:
@@ -161,7 +156,6 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
     if str(year) not in combined:
         return False
 
-    # Require correct hour label in either slug or title
     hour_bits = [
         f"{hour_12}{suffix}",
         f"{hour_12}:00{suffix}",
@@ -174,10 +168,7 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
         f"{hour_12}:00 {suffix} et",
     ]
 
-    if any(bit in combined for bit in hour_bits):
-        return True
-
-    return False
+    return any(bit in combined for bit in hour_bits)
 
 
 def _resolve_from_active_market_scan(candidate_times: list[datetime]) -> tuple[dict, datetime]:
@@ -194,9 +185,9 @@ def _resolve_from_active_market_scan(candidate_times: list[datetime]) -> tuple[d
         ).strip().lower()
 
         combined = f"{slug} | {question}"
-        if "bitcoin" in combined or "btc" in combined:
-            if "up or down" in combined:
-                btc_like.append(combined)
+
+        if ("bitcoin" in combined or "btc" in combined) and "up or down" in combined:
+            btc_like.append(combined)
 
     print(f"[RESOLVER] Active BTC-like markets found: {len(btc_like)}")
     for sample in btc_like[:15]:
@@ -211,13 +202,6 @@ def _resolve_from_active_market_scan(candidate_times: list[datetime]) -> tuple[d
 
 
 def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
-    """
-    Public function expected by bot.py.
-
-    Resolution order:
-    1) Try direct slug lookup for likely hour buckets
-    2) Fall back to active-market scan if slug lookup misses
-    """
     now_utc = datetime.now(UTC)
     now_et = now_utc.astimezone(ET)
     base_et = now_et.replace(minute=0, second=0, microsecond=0)
@@ -230,7 +214,6 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
 
     last_error = None
 
-    # First pass: direct slug lookups
     for candidate_dt in candidate_times:
         slug = build_btc_hourly_slug(candidate_dt)
         try:
@@ -256,7 +239,6 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
             print(f"[RESOLVER] Direct slug miss -> {slug} | {e}")
             last_error = e
 
-    # Second pass: scan active markets and match the real live hourly market
     try:
         market, matched_dt = _resolve_from_active_market_scan(candidate_times)
         slug = str(market.get("slug", "")).strip()
