@@ -69,7 +69,7 @@ def fetch_market_by_slug(slug: str) -> dict:
     return resp.json()
 
 
-def fetch_active_markets(limit: int = 500) -> list[dict]:
+def fetch_active_markets(limit: int = 2000) -> list[dict]:
     params = {
         "active": "true",
         "closed": "false",
@@ -125,42 +125,82 @@ def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool
         or ""
     ).strip().lower()
 
+    month_name = candidate_dt.strftime("%B").lower()
+    day = candidate_dt.day
+    year = candidate_dt.year
+    hour_12, suffix = _to_12h(candidate_dt.hour)
+
     expected_slug = build_btc_hourly_slug(candidate_dt)
 
+    # Exact slug match first
     if slug == expected_slug:
         return True
 
-    # Flexible title fallback:
-    # Example human title format:
-    # "Bitcoin Up or Down - April 4, 3AM ET"
-    month_name = candidate_dt.strftime("%B").lower()
-    day = candidate_dt.day
-    hour_12, suffix = _to_12h(candidate_dt.hour)
-    hour_label = f"{hour_12}{suffix} et"
+    # Must be BTC/Bitcoin up-down style market
+    combined = f"{slug} {question}"
 
-    if "bitcoin up or down" not in question:
+    if "bitcoin" not in combined and "btc" not in combined:
         return False
 
-    # Exclude other BTC products like 5m / 15m / 4h windows
-    if ":" in question:
-        return False
-    if "5 minute" in question or "15 minute" in question or "4 hour" in question:
-        return False
-    if "5m" in slug or "15m" in slug or "4h" in slug:
+    if "up or down" not in combined:
         return False
 
-    if month_name not in question:
+    # Exclude non-hourly BTC products
+    if "4 hour" in combined or "4h" in combined:
         return False
-    if f"{day}," not in question and f" {day} " not in question:
+    if "5 minute" in combined or "5m" in combined:
         return False
-    if hour_label not in question:
+    if "15 minute" in combined or "15m" in combined:
         return False
 
-    return True
+    # Require correct date
+    if month_name not in combined:
+        return False
+    if str(day) not in combined:
+        return False
+    if str(year) not in combined:
+        return False
+
+    # Require correct hour label in either slug or title
+    hour_bits = [
+        f"{hour_12}{suffix}",
+        f"{hour_12}:00{suffix}",
+        f"{hour_12} {suffix}",
+        f"{hour_12}:00 {suffix}",
+        f"{hour_12}{suffix}-et",
+        f"{hour_12}:00{suffix}-et",
+        f"{hour_12}{suffix} et",
+        f"{hour_12}:00{suffix} et",
+        f"{hour_12}:00 {suffix} et",
+    ]
+
+    if any(bit in combined for bit in hour_bits):
+        return True
+
+    return False
 
 
 def _resolve_from_active_market_scan(candidate_times: list[datetime]) -> tuple[dict, datetime]:
-    markets = fetch_active_markets(limit=500)
+    markets = fetch_active_markets(limit=2000)
+
+    btc_like = []
+    for market in markets:
+        slug = str(market.get("slug", "")).strip().lower()
+        question = str(
+            market.get("question")
+            or market.get("title")
+            or market.get("name")
+            or ""
+        ).strip().lower()
+
+        combined = f"{slug} | {question}"
+        if "bitcoin" in combined or "btc" in combined:
+            if "up or down" in combined:
+                btc_like.append(combined)
+
+    print(f"[RESOLVER] Active BTC-like markets found: {len(btc_like)}")
+    for sample in btc_like[:15]:
+        print(f"[RESOLVER] BTC MARKET SAMPLE -> {sample}")
 
     for candidate_dt in candidate_times:
         for market in markets:
