@@ -111,14 +111,14 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
     Floors to the current ET hour so 7:10pm ET resolves 7pm ET market.
     Tries current hour first, then previous hour as fallback.
     """
-now_utc = datetime.now(UTC)
-now_et = now_utc.astimezone(ET)
-base_et = now_et.replace(minute=0, second=0, microsecond=0)
+    now_utc = datetime.now(UTC)
+    now_et = now_utc.astimezone(ET)
+    base_et = now_et.replace(minute=0, second=0, microsecond=0)
 
-candidate_times = [
-    base_et + timedelta(hours=1),
-    base_et,
-]
+    candidate_times = [
+        base_et + timedelta(hours=1),
+        base_et,
+    ]
 
     last_error = None
 
