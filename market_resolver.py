@@ -7,6 +7,7 @@ import requests
 
 
 GAMMA_MARKET_BY_SLUG_URL = "https://gamma-api.polymarket.com/markets/slug/{slug}"
+GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 
@@ -54,7 +55,6 @@ def fetch_coinbase_spot() -> float:
 
 
 def fetch_hour_open_btc() -> float:
-    # Stable fallback so the bot can keep running without Binance.
     return fetch_coinbase_spot()
 
 
@@ -67,6 +67,18 @@ def fetch_market_by_slug(slug: str) -> dict:
 
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_active_markets(limit: int = 500) -> list[dict]:
+    params = {
+        "active": "true",
+        "closed": "false",
+        "limit": limit,
+    }
+    resp = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, list) else []
 
 
 def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
@@ -104,12 +116,67 @@ def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
     return str(token_ids[0]), str(token_ids[1])
 
 
+def _is_matching_btc_hourly_market(market: dict, candidate_dt: datetime) -> bool:
+    slug = str(market.get("slug", "")).strip().lower()
+    question = str(
+        market.get("question")
+        or market.get("title")
+        or market.get("name")
+        or ""
+    ).strip().lower()
+
+    expected_slug = build_btc_hourly_slug(candidate_dt)
+
+    if slug == expected_slug:
+        return True
+
+    # Flexible title fallback:
+    # Example human title format:
+    # "Bitcoin Up or Down - April 4, 3AM ET"
+    month_name = candidate_dt.strftime("%B").lower()
+    day = candidate_dt.day
+    hour_12, suffix = _to_12h(candidate_dt.hour)
+    hour_label = f"{hour_12}{suffix} et"
+
+    if "bitcoin up or down" not in question:
+        return False
+
+    # Exclude other BTC products like 5m / 15m / 4h windows
+    if ":" in question:
+        return False
+    if "5 minute" in question or "15 minute" in question or "4 hour" in question:
+        return False
+    if "5m" in slug or "15m" in slug or "4h" in slug:
+        return False
+
+    if month_name not in question:
+        return False
+    if f"{day}," not in question and f" {day} " not in question:
+        return False
+    if hour_label not in question:
+        return False
+
+    return True
+
+
+def _resolve_from_active_market_scan(candidate_times: list[datetime]) -> tuple[dict, datetime]:
+    markets = fetch_active_markets(limit=500)
+
+    for candidate_dt in candidate_times:
+        for market in markets:
+            if _is_matching_btc_hourly_market(market, candidate_dt):
+                return market, candidate_dt
+
+    raise Exception("No matching active BTC hourly market found from active market scan")
+
+
 def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
     """
     Public function expected by bot.py.
-    Uses UTC -> ET conversion to avoid double-offset timezone bugs.
-    Floors to the current ET hour so 7:10pm ET resolves 7pm ET market.
-    Tries current hour first, then previous hour as fallback.
+
+    Resolution order:
+    1) Try direct slug lookup for likely hour buckets
+    2) Fall back to active-market scan if slug lookup misses
     """
     now_utc = datetime.now(UTC)
     now_et = now_utc.astimezone(ET)
@@ -120,13 +187,14 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
         base_et + timedelta(hours=1),
         base_et - timedelta(hours=1),
     ]
-    
+
     last_error = None
 
+    # First pass: direct slug lookups
     for candidate_dt in candidate_times:
         slug = build_btc_hourly_slug(candidate_dt)
-
         try:
+            print(f"[RESOLVER] Trying slug -> {slug}")
             market = fetch_market_by_slug(slug)
             yes_token_id, no_token_id = _parse_clob_token_ids(market)
             hour_open_btc = fetch_hour_open_btc()
@@ -145,15 +213,36 @@ def resolve_current_market_state(tz_name: str = "US/Central") -> MarketState:
                 market_hour_label=market_hour_label,
             )
         except Exception as e:
+            print(f"[RESOLVER] Direct slug miss -> {slug} | {e}")
             last_error = e
+
+    # Second pass: scan active markets and match the real live hourly market
+    try:
+        market, matched_dt = _resolve_from_active_market_scan(candidate_times)
+        slug = str(market.get("slug", "")).strip()
+        yes_token_id, no_token_id = _parse_clob_token_ids(market)
+        hour_open_btc = fetch_hour_open_btc()
+        market_hour_label = get_market_hour_label(matched_dt)
+
+        print(f"[RESOLVER] Active-scan resolved slug -> {slug}")
+        print(f"[RESOLVER] YES token -> {yes_token_id}")
+        print(f"[RESOLVER] NO token -> {no_token_id}")
+        print(f"[RESOLVER] Hour open BTC -> {hour_open_btc}")
+
+        return MarketState(
+            slug=slug,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            hour_open_btc=hour_open_btc,
+            market_hour_label=market_hour_label,
+        )
+    except Exception as e:
+        last_error = e
 
     raise Exception(str(last_error) if last_error else "Unable to resolve market state")
 
 
 def fetch_public_clob_midpoint(token_id: str) -> float | None:
-    """
-    Public function expected by bot.py.
-    """
     if not token_id:
         return None
 
