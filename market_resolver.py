@@ -10,6 +10,8 @@ GAMMA_MARKET_BY_SLUG_URL = "https://gamma-api.polymarket.com/markets/slug/{slug}
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 PUBLIC_CLOB_BOOK_URL = "https://clob.polymarket.com/book"
 COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+
 
 UTC = ZoneInfo("UTC")
 ET = ZoneInfo("America/New_York")
@@ -69,16 +71,36 @@ def fetch_market_by_slug(slug: str) -> dict:
     return resp.json()
 
 
-def fetch_active_markets(limit: int = 2000) -> list[dict]:
-    params = {
-        "limit": limit,
-        "active": "true",
-        "closed": "false",
-    }
-    resp = requests.get(GAMMA_MARKETS_URL, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else []
+def fetch_active_markets(limit: int = 500) -> list[dict]:
+    all_markets = []
+    offset = 0
+
+    while True:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "offset": offset,
+        }
+        resp = requests.get(GAMMA_EVENTS_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not isinstance(data, list) or not data:
+            break
+
+        for event in data:
+            event_markets = event.get("markets", []) or []
+            if isinstance(event_markets, list):
+                all_markets.extend(event_markets)
+
+        if len(data) < limit:
+            break
+
+        offset += limit
+
+    print(f"[RESOLVER] Active markets from events: {len(all_markets)}")
+    return all_markets
 
 
 def _parse_clob_token_ids(market: dict) -> tuple[str, str]:
