@@ -18,12 +18,12 @@ min_book_depth: 100
 strategy:
   min_edge_cents: 12
   min_move_abs: 6
-  min_entry_price: 0.05
+  min_entry_price: 0.04
   max_entry_price: 0.75
   small_trade_block_min_price: 0.01
   no_trade_min_minutes_left: 2
   no_trade_max_minutes_left: 58
-  momentum_min_score: 35
+  momentum_min_score: 30
   strong_edge_override_cents: 38
   high_momentum_override_score: 75
   min_prob_trade: 0.62
