@@ -1,99 +1,99 @@
-mode: paper
-poll_seconds: 5
-
-telegram_bot_token: "8273437550:AAGjoe3kz9notHXxHLJWXCMPfiYzRpSDomU"
-telegram_chat_id: "8485209127"
-
-app:
-  poll_interval_seconds: 5
-
-model:
-  distance_scale_usd: 35.0
-  momentum_weight: 0.35
-  time_weight: 0.75
-
-max_spread_pct: 0.12
-min_book_depth: 100
-
-strategy:
-  min_edge_cents: 12
-  min_move_abs: 6
-  min_entry_price: 0.04
-  max_entry_price: 0.75
-  small_trade_block_min_price: 0.01
-  no_trade_min_minutes_left: 2
-  no_trade_max_minutes_left: 58
-  momentum_min_score: 30
-  strong_edge_override_cents: 38
-  high_momentum_override_score: 75
-  min_prob_trade: 0.62
-
-  telegram_trade_alerts: true
-  telegram_near_miss_alerts: false
-  telegram_startup_alerts: false
-  telegram_alert_cooldown_seconds: 180
-  near_miss_ratio: 0.8
+mode: live  
+poll_seconds: 5  
   
-  scalp_tp_pct: 0.20
-  scalp_sl_pct: 0.12
-  scalp_max_hold_seconds: 480
-
-  weak_sl_percent: 0.10
-  normal_sl_percent: 0.12
-  strong_sl_percent: 0.16
-
-  strong_edge_cents: 30
-  strong_move_abs: 12
-  strong_momentum_score: 80
-  strong_grace_period_seconds: 90
+telegram_bot_token: "8273437550:AAGjoe3kz9notHXxHLJWXCMPfiYzRpSDomU"  
+telegram_chat_id: "8485209127"  
   
-  reentry_prob_shift: 0.15
-  reentry_move_shift: 10.0
-
-  time_pressure_minutes_left: 1.5
-  time_pressure_btc_distance: 120.0
-  time_pressure_min_profit: 0.06
-
-  ladder_stage1_trigger: 0.10
-  ladder_stage1_lock: 0.02
-
-  ladder_stage2_trigger: 0.18
-  ladder_trail_normal: 0.08
-  ladder_trail_tight: 0.05
-  ladder_tight_minutes_left: 2.0
-
-  ladder_filters:
-    enable_failed_continuation_filter: true
-    enable_spot_market_disconnect_filter: true
-    enable_time_left_sweet_spot_filter: true
-    enable_move_exhaustion_filter: false
-
-    failed_continuation:
-      lookback_bars: 4
-      retest_bars: 2
-      min_rejection_pct: 0.0005
-
-    spot_market_disconnect:
-      min_premium_pct: 0.015
-      max_spot_continuation_pct: 0.0008
-
-    time_left_sweet_spot:
-      min_minutes_left_for_entry: 18
-      max_minutes_left_for_entry: 35
-
-    move_exhaustion:
-      lookback_bars: 3
-      require_shrinking_bodies: true
-      max_new_extremes: 0
-
-    debug:
-      log_ladder_filters: true
-
-risk:
-  bankroll_usd: 1000
-  min_order_usd: 15
-  max_order_usd: 60
-
-logging:
-  open_trade_log_path: "open_trades.csv"
-  closed_trade_log_path: "closed_trades.csv"
+app:  
+  poll_interval_seconds: 5  
+  
+model:  
+  distance_scale_usd: 35.0  
+  momentum_weight: 0.35  
+  time_weight: 0.75  
+  
+max_spread_pct: 0.12  
+min_book_depth: 100  
+  
+strategy:  
+  min_edge_cents: 12  
+  min_move_abs: 6  
+  min_entry_price: 0.04  
+  max_entry_price: 0.75  
+  small_trade_block_min_price: 0.01  
+  no_trade_min_minutes_left: 2  
+  no_trade_max_minutes_left: 58  
+  momentum_min_score: 30  
+  strong_edge_override_cents: 38  
+  high_momentum_override_score: 75  
+  min_prob_trade: 0.62  
+  
+  telegram_trade_alerts: true  
+  telegram_near_miss_alerts: false  
+  telegram_startup_alerts: false  
+  telegram_alert_cooldown_seconds: 180  
+  near_miss_ratio: 0.8  
+    
+  scalp_tp_pct: 0.20  
+  scalp_sl_pct: 0.12  
+  scalp_max_hold_seconds: 480  
+  
+  weak_sl_percent: 0.10  
+  normal_sl_percent: 0.12  
+  strong_sl_percent: 0.16  
+  
+  strong_edge_cents: 30  
+  strong_move_abs: 12  
+  strong_momentum_score: 80  
+  strong_grace_period_seconds: 90  
+    
+  reentry_prob_shift: 0.15  
+  reentry_move_shift: 10.0  
+  
+  time_pressure_minutes_left: 1.5  
+  time_pressure_btc_distance: 120.0  
+  time_pressure_min_profit: 0.06  
+  
+  ladder_stage1_trigger: 0.10  
+  ladder_stage1_lock: 0.02  
+  
+  ladder_stage2_trigger: 0.18  
+  ladder_trail_normal: 0.08  
+  ladder_trail_tight: 0.05  
+  ladder_tight_minutes_left: 2.0  
+  
+  ladder_filters:  
+    enable_failed_continuation_filter: true  
+    enable_spot_market_disconnect_filter: true  
+    enable_time_left_sweet_spot_filter: true  
+    enable_move_exhaustion_filter: false  
+  
+    failed_continuation:  
+      lookback_bars: 4  
+      retest_bars: 2  
+      min_rejection_pct: 0.0005  
+  
+    spot_market_disconnect:  
+      min_premium_pct: 0.015  
+      max_spot_continuation_pct: 0.0008  
+  
+    time_left_sweet_spot:  
+      min_minutes_left_for_entry: 18  
+      max_minutes_left_for_entry: 35  
+  
+    move_exhaustion:  
+      lookback_bars: 3  
+      require_shrinking_bodies: true  
+      max_new_extremes: 0  
+  
+    debug:  
+      log_ladder_filters: true  
+  
+risk:  
+  bankroll_usd: 1000  
+  min_order_usd: 5  
+  max_order_usd: 10  
+  
+logging:  
+  open_trade_log_path: "open_trades.csv"  
+  closed_trade_log_path: "closed_trades.csv"  
