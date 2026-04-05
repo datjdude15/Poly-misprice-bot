@@ -1098,7 +1098,7 @@ def maybe_emit_trade(
         log(f"[TRADE] blocked same-slug reentry for slug={market_state.slug} action={signal}")
         return
 
-       if get_mode(cfg).lower() == "live":
+    if get_mode(cfg).lower() == "live":
         token_id = (
             market_state.yes_token_id
             if signal == "BUY UP"
