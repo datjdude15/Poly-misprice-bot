@@ -1098,20 +1098,20 @@ def maybe_emit_trade(
         log(f"[TRADE] blocked same-slug reentry for slug={market_state.slug} action={signal}")
         return
 
-   if get_mode(cfg).lower() == "live":
-       token_id = (
-           market_state.yes_token_id
-           if signal == "BUY UP"
-           else market_state.no_token_id
-       )
+       if get_mode(cfg).lower() == "live":
+        token_id = (
+            market_state.yes_token_id
+            if signal == "BUY UP"
+            else market_state.no_token_id
+        )
 
-       live_result = place_market_buy(
-           token_id=token_id,
-           price=entry_price,
-           size_usd=size,
-       )
+        live_result = place_market_buy(
+            token_id=token_id,
+            price=entry_price,
+            size_usd=size,
+        )
 
-       log(f"[LIVE ORDER] {live_result}")
+        log(f"[LIVE ORDER] {live_result}")
     trade_id = f"{market_state.slug}-{signal}-{uuid.uuid4().hex[:8]}"
     trade_row = create_open_trade_row(
         cfg=cfg,
