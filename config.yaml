@@ -1,4 +1,4 @@
-mode: paper  
+mode: live 
 poll_seconds: 5  
   
 telegram_bot_token: "8273437550:AAGjoe3kz9notHXxHLJWXCMPfiYzRpSDomU"  
