@@ -2,7 +2,7 @@ mode: paper
 poll_seconds: 5  
   
 telegram_bot_token: "8273437550:AAGjoe3kz9notHXxHLJWXCMPfiYzRpSDomU"  
-telegram_chat_id: "8485209127"  
+telegram_chat_id: ""  
   
 app:  
   poll_interval_seconds: 5  
