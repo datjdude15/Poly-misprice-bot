@@ -28,7 +28,7 @@ strategy:
   high_momentum_override_score: 75  
   min_prob_trade: 0.62  
   
-  telegram_trade_alerts: true  
+  telegram_trade_alerts: false  
   telegram_near_miss_alerts: false  
   telegram_startup_alerts: false  
   telegram_alert_cooldown_seconds: 180  
